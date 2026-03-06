@@ -9,6 +9,8 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#pragma once
+
 struct slot {
     char name[FF_MAX_LFN+1];
     char type[7];

@@ -39,6 +39,9 @@
 #elif MCU == MCU_at32f435
 #define FIRMWARE_START 0x0800c000
 #define FIRMWARE_END   (0x08040000 - FLASH_PAGE_SIZE)
+#elif MCU == MCU_stm32f411
+#define FIRMWARE_START 0x0800c000
+#define FIRMWARE_END   (0x0807C000 - FLASH_PAGE_SIZE)
 #endif
 #define FILE_PATTERN   "ff_gotek*.upd"
 

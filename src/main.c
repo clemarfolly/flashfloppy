@@ -9,6 +9,8 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#include <stdint.h>
+
 int EXC_reset(void) __attribute__((alias("main")));
 
 static const char image_a[] = "IMAGE_A.CFG";
@@ -2859,6 +2861,8 @@ static void noinline mcu_info(void)
     const char * const mcu = mcus[!!is_artery_mcu];
 #elif MCU == MCU_at32f435
     const static char mcu[] = "AT32F435";
+#elif MCU == MCU_stm32f411
+    const static char mcu[] = "STM32F411";
 #endif
     char msg[20];
     snprintf(msg, sizeof(msg), "%uMHz, %ukB", SYSCLK_MHZ, ram_kb);
@@ -3029,6 +3033,8 @@ static void noinline banner(void)
 
     case DT_LED_7SEG:
 #if MCU == MCU_stm32f105
+#define sep_ch "-"
+#elif MCU == MCU_stm32f411
 #define sep_ch "-"
 #elif MCU == MCU_at32f435
 #define sep_ch "z"

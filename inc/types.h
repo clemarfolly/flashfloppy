@@ -7,6 +7,8 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#pragma once
+
 #if LEVEL == LEVEL_debug
 #define ASSERT(p) do { if (!(p)) illegal(); } while (0)
 #else

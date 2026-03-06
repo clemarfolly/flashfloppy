@@ -81,8 +81,14 @@ void floppy_cancel(void)
     IRQx_disable(dma_wdata_irq);
     rdata_stop();
     wdata_stop();
+
+#if MCU == MCU_stm32f411  
+    dma_rdata.cr = 0;
+    dma_wdata.cr = 0;
+#else
     dma_rdata.ccr = 0;
     dma_wdata.ccr = 0;
+#endif
 
     /* Clear soft state. */
     timer_cancel(&window.timer);
@@ -207,7 +213,11 @@ static void floppy_sync_flux(void)
     uint32_t oldpri;
 
     /* No DMA should occur until the timer is enabled. */
+#if MCU == MCU_stm32f411  
+    ASSERT(dma_rd->cons == (ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr));
+#else
     ASSERT(dma_rd->cons == (ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr));
+#endif
 
     nr_to_wrap = ARRAY_SIZE(dma_rd->buf) - dma_rd->prod;
     nr_to_cons = (dma_rd->cons - dma_rd->prod - 1) & buf_mask;
@@ -270,8 +280,13 @@ static bool_t dma_rd_handle(struct drive *drv)
     case DMA_stopping:
         dma_rd->state = DMA_inactive;
         /* Reinitialise the circular buffer to empty. */
+#if MCU == MCU_stm32f411  
         dma_rd->cons = dma_rd->prod =
-            ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+                    ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr;
+#else
+        dma_rd->cons = dma_rd->prod =
+                    ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+#endif
         /* Free-running index timer. */
         timer_cancel(&index.timer);
         timer_set(&index.timer, index.prev_time + drv->image->stk_per_rev);

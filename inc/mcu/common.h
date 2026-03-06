@@ -96,7 +96,12 @@ void fpec_init(void);
 void fpec_page_erase(uint32_t flash_address);
 void fpec_write(const void *data, unsigned int size, uint32_t flash_address);
 
+#if MCU == MCU_stm32f411
+#define FLASH_PAGE_SIZE 16384
+#else
 #define FLASH_PAGE_SIZE 2048
+#endif
+
 extern unsigned int flash_page_size;
 extern unsigned int ram_kb;
 

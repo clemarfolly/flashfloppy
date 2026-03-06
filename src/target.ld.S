@@ -5,6 +5,9 @@
 #elif MCU == MCU_stm32f105
 #define FLASH_BASE 0x08008000
 
+#elif MCU == MCU_stm32f411
+#define FLASH_BASE 0x0800c000  /* Bootloader em 0-48KB, firmware em 48KB+ */
+
 #elif MCU == MCU_at32f435
 #define FLASH_BASE 0x0800c000
 #endif

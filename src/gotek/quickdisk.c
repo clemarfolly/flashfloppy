@@ -22,12 +22,25 @@ static uint8_t pin_02 = 7; /* PB7 */
 #define pin_08      8      /* PB8 */
 static uint8_t pin_26 = 6; /* PB6 */
 #define pin_28      5      /* PB5 */
+#if MCU == MCU_stm32f411  
+#define pin_34      2      /* PB2 - Blackpill */
+#else
 #define pin_34      3      /* PB3 */
+#endif
 #define pin_media   pin_02 /* /MS: LOW = Media present */
 #define pin_wrprot  pin_28 /* /WP: LOW = Media present and writeable */
 #define pin_ready   pin_34 /* /RY: LOW = Read/write window active */
 
 /* RDATA and /WDATA */
+
+#if MCU == MCU_stm32f411  
+
+// in stm32f411_decls.h
+DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
+DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
+
+#else
+
 #define gpio_data gpioa
 
 #define pin_wdata   8      /* /WD: Negative pulse signal */
@@ -43,6 +56,8 @@ DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
 #define dma_rdata_ch 3
 #define dma_rdata_irq DMA1_CH3_IRQ
 DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
+
+#endif
 
 /* EXTI IRQs. */
 #define motor_irq  6
@@ -88,6 +103,32 @@ static void board_floppy_init(void)
 
     dmamux1->cctrl[dma_wdata_ch-1] = DMAMUX_CCTRL_REQSEL(DMAMUX_REQ_TIM1_CH1);
     dmamux1->cctrl[dma_rdata_ch-1] = DMAMUX_CCTRL_REQSEL(DMAMUX_REQ_TIM3_OVF);
+
+#elif MCU == MCU_stm32f411
+
+#define change_pin_mode(gpio, pin, mode)                \
+    gpio->moder = (gpio->moder & ~(0x3u<<((pin)<<1)))   \
+        | (((mode)&0x3u)<<((pin)<<1));
+
+#define afio syscfg
+
+#if TARGET == TARGET_shugart
+    gpio_set_af(gpioa, pin_step, 1);
+    gpio_configure_pin(gpioa, pin_step, AFI(PUPD_none));
+#endif
+
+    gpio_set_af(gpio_data, pin_wdata, 1);
+    gpio_configure_pin(gpio_data, pin_wdata, AFI(PUPD_none));
+
+    gpio_set_af(gpio_data, pin_rdata, 2);
+    gpio_configure_pin(gpio_data, pin_rdata, GPO_bus);
+
+    /* STM32F411: DMA request mapping is fixed per stream/channel.
+     * wdata: TIM1_CH1  -> DMA2 Stream6 Channel6 (RM0383 Table 27)
+     * rdata: TIM3_UP   -> DMA1 Stream7 Channel5 (RM0383 Table 26) */
+    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
+    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
+
 
 #endif
 

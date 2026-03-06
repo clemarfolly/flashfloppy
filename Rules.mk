@@ -39,6 +39,10 @@ else ifeq ($(mcu),at32f435)
 FLAGS += -mcpu=cortex-m4
 endif
 
+ifeq ($(mcu),stm32f411)
+FLAGS += -mcpu=cortex-m4
+endif
+
 MCU_FLAG := -DMCU=MCU_$(mcu)
 $(mcu) := y
 

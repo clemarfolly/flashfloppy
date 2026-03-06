@@ -23,6 +23,15 @@ void USB_OTG_BSP_Init(USB_OTG_CORE_HANDLE *pdev)
 #if MCU == MCU_stm32f105
     /* OTGFSPRE already clear in rcc->cfgr, OTG clock = PLL/3 */
     rcc->ahbenr |= RCC_AHBENR_OTGFSEN; /* OTG clock enable */
+#elif MCU == MCU_stm32f411
+    rcc->ahb1enr |= RCC_AHB1ENR_GPIOAEN;
+    rcc->ahb2enr |= RCC_AHB2ENR_OTGFSEN;
+
+    gpio_set_af(gpioa, 11, 10);
+    gpio_set_af(gpioa, 12, 10);
+
+    gpio_configure_pin(gpioa, 11, AFO_pushpull(_10MHz));
+    gpio_configure_pin(gpioa, 12, AFO_pushpull(_10MHz));
 #else
     gpio_set_af(gpioa, 11, 10);
     gpio_set_af(gpioa, 12, 10);

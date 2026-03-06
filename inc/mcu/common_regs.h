@@ -132,6 +132,10 @@ struct exti {
     uint32_t pr;         /* 14: Pending */
 };
 
+#if MCU == MCU_stm32f411
+//dma stream declaration stm32f411_decls.h
+#else
+
 /* DMA */
 struct dma_chn {
     uint32_t ccr;        /* +00: Configuration */
@@ -140,11 +144,12 @@ struct dma_chn {
     uint32_t cmar;       /* +0C: Memory address */
     uint32_t rsvd;       /* +10: - */
 };
-struct dma {
+    struct dma {
     uint32_t isr;        /* 00: Interrupt status */
     uint32_t ifcr;       /* 04: Interrupt flag clear */
     struct dma_chn ch[7];
 };
+#endif
 
 /* n=1..7 */
 #define DMA_ISR_TEIF(n)      (8u<<(((n)-1)*4))

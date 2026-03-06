@@ -9,6 +9,12 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#include <stdint.h>
+#include "util.h"
+#include "types.h"
+#include "time.h"
+#include "stm32f411_decls.h"
+
 #define O_FALSE 1
 #define O_TRUE  0
 
@@ -40,6 +46,17 @@ static uint8_t pin_02 = 7; /* PB7 */
 #define pin_08      8      /* PB8 */
 static uint8_t pin_26 = 6; /* PB6 */
 #define pin_28      5      /* PB5 */
+
+#if MCU == MCU_stm32f411
+
+#define pin_34      2      /* PB2 Blackpill */
+
+// in stm32f411_decls.h
+DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
+DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
+
+#else
+
 #define pin_34      3      /* PB3 */
 
 #define gpio_data gpioa
@@ -57,6 +74,7 @@ DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
 #define dma_rdata_ch 3
 #define dma_rdata_irq DMA1_CH3_IRQ
 DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
+#endif
 
 /* Head step handling. */
 #if TARGET == TARGET_apple2
@@ -167,6 +185,31 @@ static void board_floppy_init(void)
     dmamux1->cctrl[dma_wdata_ch-1] = DMAMUX_CCTRL_REQSEL(DMAMUX_REQ_TIM1_CH1);
     dmamux1->cctrl[dma_rdata_ch-1] = DMAMUX_CCTRL_REQSEL(DMAMUX_REQ_TIM3_OVF);
 
+#elif MCU == MCU_stm32f411
+
+#define change_pin_mode(gpio, pin, mode)                \
+    gpio->moder = (gpio->moder & ~(0x3u<<((pin)<<1)))   \
+        | (((mode)&0x3u)<<((pin)<<1));
+
+#define afio syscfg
+
+#if TARGET == TARGET_shugart
+    gpio_set_af(gpioa, pin_step, 1);
+    gpio_configure_pin(gpioa, pin_step, AFI(PUPD_none));
+#endif
+
+    gpio_set_af(gpio_data, pin_wdata, pin_wdata_af);
+    gpio_configure_pin(gpio_data, pin_wdata, AFI(PUPD_none));
+
+    //gpio_set_af(gpio_data, pin_rdata, 2);
+    gpio_configure_pin(gpio_data, pin_rdata, GPO_bus);
+
+    /* STM32F411: DMA request mapping is fixed per stream/channel.
+     * wdata: TIM1_CH1  -> DMA2 Stream6 Channel6 (RM0383 Table 27)
+     * rdata: TIM3_UP   -> DMA1 Stream7 Channel5 (RM0383 Table 26) */
+    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
+    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
+
 #endif
 
     /* PA1 (STEP) triggers IRQ via TIM2 Channel 2, since EXTI is used for 
@@ -272,8 +315,15 @@ static void _IRQ_SELA_changed(uint32_t _gpio_out_active)
     if (drive.sel) {
         /* SELA is asserted (this drive is selected). 
          * Immediately re-enable all our asserted outputs. */
+         
+#if MCU == MCU_stm32f411
+        gpiob->bsrr = (_gpio_out_active & 0xFFFF) << 16;
+        gpioa->bsrr = (_gpio_out_active >> 16) << 16;
+#else
         gpiob->brr = _gpio_out_active & 0xffff;
         gpioa->brr = _gpio_out_active >> 16;
+#endif
+         
         /* Set pin_rdata as timer output (AFO_bus). */
         if (_gpio_out_active & m(GPIO_OUT_DMA_RD_ACTIVE))
             change_pin_mode(gpio_data, pin_rdata, AFO_bus);
@@ -287,7 +337,11 @@ static void _IRQ_SELA_changed(uint32_t _gpio_out_active)
         /* Set pin_rdata as quiescent (GPO_bus). */
         change_pin_mode(gpio_data, pin_rdata, GPO_bus);
         /* Speculate that, on next interrupt, SELA is asserted. */
+#if MCU == MCU_stm32f411
+        *(uint8_t *)&gpiob_setreset = (uint8_t)(uint32_t)&gpiob->bsrr;
+#else
         *(uint8_t *)&gpiob_setreset = (uint8_t)(uint32_t)&gpiob->brr;
+#endif
     }
 }
 

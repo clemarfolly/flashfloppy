@@ -245,7 +245,13 @@ static void floppy_mount(struct slot *slot)
 static void timer_dma_init(void)
 {
     /* Enable DMA interrupts. */
+#if MCU == MCU_stm32f411
+    clear_dma_interrupts_rdata();
+    clear_dma_interrupts_wdata();
+#else
     dma1->ifcr = DMA_IFCR_CGIF(dma_rdata_ch) | DMA_IFCR_CGIF(dma_wdata_ch);
+#endif
+    
     IRQx_set_prio(dma_rdata_irq, RDATA_IRQ_PRI);
     IRQx_set_prio(dma_wdata_irq, WDATA_IRQ_PRI);
     IRQx_enable(dma_rdata_irq);
@@ -271,18 +277,44 @@ static void timer_dma_init(void)
     tim_rdata->cr2 = 0;
 
     /* DMA setup: From a circular buffer into the RDATA Timer's ARR. */
-    dma_rdata.cpar = (uint32_t)(unsigned long)&tim_rdata->arr;
-    dma_rdata.cmar = (uint32_t)(unsigned long)dma_rd->buf;
-    dma_rdata.cndtr = ARRAY_SIZE(dma_rd->buf);
-    dma_rdata.ccr = (DMA_CCR_PL_HIGH |
-                     DMA_CCR_MSIZE_16BIT |
-                     DMA_CCR_PSIZE_16BIT |
-                     DMA_CCR_MINC |
-                     DMA_CCR_CIRC |
-                     DMA_CCR_DIR_M2P |
-                     DMA_CCR_HTIE |
-                     DMA_CCR_TCIE |
+
+    
+    
+#if MCU == MCU_stm32f411
+
+    dma_rdata.par = (uint32_t)(unsigned long)&tim_rdata->arr;
+    dma_rdata.m0ar = (uint32_t)(unsigned long)dma_rd->buf;
+    dma_rdata.ndtr = ARRAY_SIZE(dma_rd->buf);
+
+    dma_rdata.cr =
+          DMA_SxCR_PL_HIGH        | // Prioridade alta do stream (PL[17:16] = 10)
+          DMA_SxCR_MSIZE_16BIT    | // Tamanho do dado na memória = 16 bits (MSIZE[14:13] = 01)
+          DMA_SxCR_PSIZE_16BIT    | // Tamanho do dado no periférico = 16 bits (PSIZE[12:11] = 01)
+          DMA_SxCR_MINC           | // Incrementa o endereço da memória a cada transferência
+          DMA_SxCR_CIRC           | // Modo circular (reinicia automaticamente ao chegar em NDTR = 0)
+          DMA_SxCR_DIR_M2P        | // Direção: memória -> periférico (DIR[7:6] = 01)
+          DMA_SxCR_HTIE           | // Habilita interrupção de Half Transfer
+          DMA_SxCR_TCIE           | // Habilita interrupção de Transfer Complete
+          DMA_SxCR_EN;              // Habilita o stream (inicia a transferência)
+    
+    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
+    
+#else
+
+    dma_rdata.cpar = (uint32_t)(unsigned long)&tim_rdata->arr; 
+    dma_rdata.cmar = (uint32_t)(unsigned long)dma_rd->buf; 
+    dma_rdata.cndtr = ARRAY_SIZE(dma_rd->buf); 
+    dma_rdata.ccr = (DMA_CCR_PL_HIGH | 
+                     DMA_CCR_MSIZE_16BIT | 
+                     DMA_CCR_PSIZE_16BIT | 
+                     DMA_CCR_MINC | 
+                     DMA_CCR_CIRC | 
+                     DMA_CCR_DIR_M2P | 
+                     DMA_CCR_HTIE | 
+                     DMA_CCR_TCIE | 
                      DMA_CCR_EN);
+
+#endif
 
     /* WDATA Timer setup: 
      * The counter runs from 0x0000-0xFFFF inclusive at SAMPLECLK rate.
@@ -297,6 +329,29 @@ static void timer_dma_init(void)
     tim_wdata->dier = TIM_DIER_CC1DE | (WDATA_TOGGLE ? TIM_DIER_CC1IE : 0);
     tim_wdata->cr2 = 0;
 
+
+#if MCU == MCU_stm32f411
+
+    /* DMA setup: From the WDATA Timer's CCRx into a circular buffer. */
+    dma_wdata.par = (uint32_t)(unsigned long)&tim_wdata->ccr1;
+    dma_wdata.m0ar = (uint32_t)(unsigned long)dma_wr->buf;
+    dma_wdata.ndtr = ARRAY_SIZE(dma_wr->buf);
+                     
+    dma_wdata.cr =
+          DMA_SxCR_PL_HIGH        | // Prioridade alta do stream (PL[17:16] = 10)
+          DMA_SxCR_MSIZE_16BIT    | // Tamanho do dado na memória = 16 bits (MSIZE[14:13] = 01)
+          DMA_SxCR_PSIZE_16BIT    | // Tamanho do dado no periférico = 16 bits (PSIZE[12:11] = 01)
+          DMA_SxCR_MINC           | // Incrementa o endereço da memória a cada transferência
+          DMA_SxCR_CIRC           | // Modo circular (reinicia automaticamente ao chegar em NDTR = 0)
+          DMA_SxCR_DIR_P2M        | // Direção: periférico -> memória 
+          DMA_SxCR_HTIE           | // Habilita interrupção de Half Transfer
+          DMA_SxCR_TCIE           | // Habilita interrupção de Transfer Complete
+          DMA_SxCR_EN;    
+
+    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
+
+#else
+
     /* DMA setup: From the WDATA Timer's CCRx into a circular buffer. */
     dma_wdata.cpar = (uint32_t)(unsigned long)&tim_wdata->ccr1;
     dma_wdata.cmar = (uint32_t)(unsigned long)dma_wr->buf;
@@ -310,6 +365,9 @@ static void timer_dma_init(void)
                      DMA_CCR_HTIE |
                      DMA_CCR_TCIE |
                      DMA_CCR_EN);
+                     
+#endif
+
 }
 
 static unsigned int drive_calc_track(struct drive *drv)
@@ -365,7 +423,17 @@ static void wdata_stop(void)
 
     /* Remember where this write's DMA stream ended. */
     write = get_write(image, image->wr_prod);
+    
+#if MCU == MCU_stm32f411
+
+    write->dma_end = ARRAY_SIZE(dma_wr->buf) - dma_wdata.ndtr;
+    
+#else
+
     write->dma_end = ARRAY_SIZE(dma_wr->buf) - dma_wdata.cndtr;
+
+#endif
+
     image->wr_prod++;
 
 #if TARGET == TARGET_shugart || TARGET == TARGET_apple2
@@ -575,14 +643,24 @@ static void IRQ_rdata_dma(void)
     struct drive *drv = &drive;
 
     /* Clear DMA peripheral interrupts. */
+    
+#if MCU == MCU_stm32f411
+    clear_dma_interrupts_rdata();
+#else
     dma1->ifcr = DMA_IFCR_CGIF(dma_rdata_ch);
+#endif
+    
 
     /* If we happen to be called in the wrong state, just bail. */
     if (dma_rd->state != DMA_active)
         return;
 
     /* Find out where the DMA engine's consumer index has got to. */
-    dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+#if MCU == MCU_stm32f411
+dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr;
+#else
+dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+#endif
 
     /* Check for DMA catching up with the producer index (underrun). */
     if (((dmacons < dma_rd->cons)
@@ -627,7 +705,11 @@ static void IRQ_rdata_dma(void)
         /* Ticks left in current sample. */
         ticks = tim_rdata->arr - tim_rdata->cnt;
         /* Index of next sample. */
-        dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+#if MCU == MCU_stm32f411        
+    dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr;
+#else
+    dmacons = ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+#endif         
         /* If another sample was loaded meanwhile, try again for a consistent
          * snapshot. */
         if (dmacons == dma_rd->cons)
@@ -656,14 +738,21 @@ static void IRQ_wdata_dma(void)
     struct write *write = NULL;
 
     /* Clear DMA peripheral interrupts. */
+#if MCU == MCU_stm32f411        
+    clear_dma_interrupts_wdata();
+#else
     dma1->ifcr = DMA_IFCR_CGIF(dma_wdata_ch);
-
+#endif
     /* If we happen to be called in the wrong state, just bail. */
     if (dma_wr->state == DMA_inactive)
         return;
 
     /* Find out where the DMA engine's producer index has got to. */
+#if MCU == MCU_stm32f411        
+    prod = ARRAY_SIZE(dma_wr->buf) - dma_wdata.ndtr;
+#else
     prod = ARRAY_SIZE(dma_wr->buf) - dma_wdata.cndtr;
+#endif
 
     /* Check if we are processing the tail end of a write. */
     barrier(); /* interrogate peripheral /then/ check for write-end. */

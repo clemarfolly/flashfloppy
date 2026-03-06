@@ -26,6 +26,9 @@
 #elif MCU == MCU_at32f435
 #define FIRMWARE_START 0x08000000
 #define FIRMWARE_END   0x0800c000
+#elif MCU== MCU_stm32f411
+#define FIRMWARE_START 0x08000000
+#define FIRMWARE_END   0x0800c000
 #endif
 
 /* The update payload. */

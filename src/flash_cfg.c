@@ -33,6 +33,8 @@ union cfg_slot {
 #define SLOT_BASE (union cfg_slot *)(0x8020000 - FLASH_PAGE_SIZE)
 #elif MCU == MCU_at32f435
 #define SLOT_BASE (union cfg_slot *)(0x8040000 - FLASH_PAGE_SIZE)
+#elif MCU == MCU_stm32f411
+#define SLOT_BASE (union cfg_slot *)(0x8080000 - FLASH_PAGE_SIZE)
 #endif
 #define SLOT_NR   (FLASH_PAGE_SIZE / sizeof(union cfg_slot))
 

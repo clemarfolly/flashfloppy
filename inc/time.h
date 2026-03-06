@@ -9,6 +9,10 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
+#pragma once
+
+#include <stdint.h>
+
 typedef uint32_t time_t;
 
 #define TIME_MHZ STK_MHZ

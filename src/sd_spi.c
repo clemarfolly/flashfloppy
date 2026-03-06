@@ -310,6 +310,13 @@ static DSTATUS sd_disk_initialize(BYTE pdrv)
     gpio_configure_pin(gpiob, 14, AFI(PUPD_up)); /* MISO */
     gpio_set_af(gpiob, 15, 5);
     gpio_configure_pin(gpiob, 15, AFO_pushpull(SPI_PIN_SPEED)); /* MOSI */
+#elif MCU == MCU_stm32f411
+    gpio_set_af(gpiob, 13, 5);
+    gpio_configure_pin(gpiob, 13, AFO_pushpull(SPI_PIN_SPEED)); /* CK */
+    gpio_set_af(gpiob, 14, 5);
+    gpio_configure_pin(gpiob, 14, AFI(PUPD_up)); /* MISO */
+    gpio_set_af(gpiob, 15, 5);
+    gpio_configure_pin(gpiob, 15, AFO_pushpull(SPI_PIN_SPEED)); /* MOSI */
 #endif
 
     /* Configure SPI: 8-bit mode, MSB first, CPOL Low, CPHA Leading Edge. */

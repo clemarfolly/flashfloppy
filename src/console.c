@@ -146,6 +146,12 @@ void console_init(void)
     gpio_set_af(usart_gpio, usart_rx_pin, 7);
     gpio_configure_pin(usart_gpio, usart_tx_pin, AFO_pushpull(_10MHz));
     gpio_configure_pin(usart_gpio, usart_rx_pin, AFI(PUPD_up));
+#elif MCU == MCU_stm32f411
+    /* Configure PA9 (TX) e PA10 (RX) */
+    gpio_set_af(usart_gpio, usart_tx_pin, 7);
+    gpio_set_af(usart_gpio, usart_rx_pin, 7);
+    gpio_configure_pin(usart_gpio, usart_tx_pin, AFO_pushpull(_10MHz));
+    gpio_configure_pin(usart_gpio, usart_rx_pin, AFI(PUPD_up));
 #endif
 
     /* BAUD, 8n1. */

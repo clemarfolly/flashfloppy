@@ -266,6 +266,10 @@ void led_7seg_init(void)
         DAT_PIN = 6; /* PB6 */
         CLK_PIN = 7; /* PB7 */
     }
+#if MCU == MCU_stm32f411
+    /* BlackPill has no PB11: display header uses PB10 (DAT) and PB3 (CLK). */
+    CLK_PIN = 3; /* PB3 */
+#endif
 
     nr_digits = !tm1651_init() ? 3 : 2;
     if (nr_digits == 2)

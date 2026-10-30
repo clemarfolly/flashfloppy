@@ -22,7 +22,7 @@ static uint8_t pin_02 = 7; /* PB7 */
 #define pin_08      8      /* PB8 */
 static uint8_t pin_26 = 6; /* PB6 */
 #define pin_28      5      /* PB5 */
-#if MCU == MCU_stm32f411  
+#if MCU == MCU_stm32f411
 #define pin_34      2      /* PB2 - Blackpill */
 #else
 #define pin_34      3      /* PB3 */
@@ -33,9 +33,9 @@ static uint8_t pin_26 = 6; /* PB6 */
 
 /* RDATA and /WDATA */
 
-#if MCU == MCU_stm32f411  
+#if MCU == MCU_stm32f411
 
-// in stm32f411_decls.h
+/* RDATA/WDATA pins, timers and DMA streams: see stm32f411_decls.h */
 DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
 DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
 
@@ -106,29 +106,18 @@ static void board_floppy_init(void)
 
 #elif MCU == MCU_stm32f411
 
-#define change_pin_mode(gpio, pin, mode)                \
-    gpio->moder = (gpio->moder & ~(0x3u<<((pin)<<1)))   \
-        | (((mode)&0x3u)<<((pin)<<1));
-
 #define afio syscfg
 
-#if TARGET == TARGET_shugart
-    gpio_set_af(gpioa, pin_step, 1);
-    gpio_configure_pin(gpioa, pin_step, AFI(PUPD_none));
-#endif
+    gpio_set_af(gpioa, pin_reset, 1);
+    gpio_configure_pin(gpioa, pin_reset, AFI(PUPD_none));
 
-    gpio_set_af(gpio_data, pin_wdata, 1);
+    gpio_set_af(gpio_data, pin_wdata, pin_wdata_af);
     gpio_configure_pin(gpio_data, pin_wdata, AFI(PUPD_none));
 
-    gpio_set_af(gpio_data, pin_rdata, 2);
-    gpio_configure_pin(gpio_data, pin_rdata, GPO_bus);
+    gpio_set_af(gpio_data, pin_rdata, pin_rdata_af);
+    gpio_configure_pin(gpio_data, pin_rdata, GPO_rdata);
 
-    /* STM32F411: DMA request mapping is fixed per stream/channel.
-     * wdata: TIM1_CH1  -> DMA2 Stream6 Channel6 (RM0383 Table 27)
-     * rdata: TIM3_UP   -> DMA1 Stream7 Channel5 (RM0383 Table 26) */
-    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
-    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
-
+    /* No DMAMUX: DMA channel selection is done in timer_dma_init(). */
 
 #endif
 

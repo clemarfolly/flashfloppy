@@ -45,17 +45,21 @@ static USART usart2 = (struct usart *)USART2_BASE;
 static USART usart3 = (struct usart *)USART3_BASE;
 static USB_OTG usb_otg = (struct usb_otg *)USB_OTG_BASE;
 
-/* Clocks for STM32F411 */
-#define SYSCLK_MHZ 100
-#define AHB_MHZ    100
-#define APB1_MHZ   50
-#define APB2_MHZ   100
+/* Clocks for STM32F411 (BlackPill, 25MHz HSE).
+ * FlashFloppy samples flux at SAMPLECLK_MHZ (72MHz), and the RDATA/WDATA timer
+ * prescalers require SYSCLK to be a multiple of that. The F411 tops out at
+ * 100MHz, so we run at 72MHz (the same as the original STM32F105 Gotek). */
+#define SYSCLK_MHZ 72
+#define AHB_MHZ    72
+#define APB1_MHZ   36
+#define APB2_MHZ   72
 
 /* GPIO */
 void gpio_set_af(GPIO gpio, unsigned int pin, unsigned int af);
 
-#define SOFTIRQ_0 85
-#define SOFTIRQ_1 86
+/* Software IRQs: borrow the (unused) SPI4 and SPI5 interrupt lines. */
+#define SOFTIRQ_0 84
+#define SOFTIRQ_1 85
 
 /*
  * Local variables:

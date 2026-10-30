@@ -1,20 +1,16 @@
 /*
  * lcd_stm32f411.c
- *
+ * 
+ * Derived from lcd_stm32f105.c for the STM32F411 (BlackPill).
+ * 
  * 1. HD44780 LCD controller via a PCF8574 I2C backpack.
  * 2. SSD1306 OLED controller driving 128x32 bitmap display.
- *
+ * 
  * Written & released by Keir Fraser <keir.xen@gmail.com>
- * Adapted for STM32F411 (I2C v1 peripheral)
- *
+ * 
  * This is free and unencumbered software released into the public domain.
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
-
-#include <stdint.h>
-#include "mcu/stm32f411.h"
-#include "mcu/stm32f411_regs.h"
-#include "types.h"
 
 /* PCF8574 pin assignment: D7-D6-D5-D4-BL-EN-RW-RS */
 #define _D7 (1u<<7)
@@ -36,26 +32,29 @@
 #define FS_2LINE         0x08
 
 /* FF OSD command set */
-#define OSD_BACKLIGHT    0x00
-#define OSD_DATA         0x02
-#define OSD_ROWS         0x10
-#define OSD_HEIGHTS      0x20
-#define OSD_BUTTONS      0x30
-#define OSD_COLUMNS      0x40
+#define OSD_BACKLIGHT    0x00 /* [0] = backlight on */
+#define OSD_DATA         0x02 /* next columns*rows bytes are text data */
+#define OSD_ROWS         0x10 /* [3:0] = #rows */
+#define OSD_HEIGHTS      0x20 /* [3:0] = 1 iff row is 2x height */
+#define OSD_BUTTONS      0x30 /* [3:0] = button mask */
+#define OSD_COLUMNS      0x40 /* [6:0] = #columns */
 struct packed i2c_osd_info {
     uint8_t protocol_ver;
     uint8_t fw_major, fw_minor;
     uint8_t buttons;
 };
 
-/* STM32 I2C peripheral. */
-#define i2c i2c2
+/* STM32F411 (BlackPill): I2C2 on PB10 (SCL, AF4) and PB3 (SDA, AF9).
+ * The F411 I2C peripheral is the same as the F105's. Differences from
+ * lcd_stm32f105.c are pin/AF selection and the stream-based DMA controller. */
+static volatile struct i2c * const i2c = (struct i2c *)I2C2_BASE;
 
-#define i2c_gpio gpiob
-#define SCL 10      // PB10
-#define SCL_AF 4    // Alternate function 4
-#define SDA 3       // PB3
-#define SDA_AF 9    // Alternate function 9
+#define SCL     10
+#define SCL_AF   4
+#define SDA      3
+#define SDA_AF   9
+
+#define PCLK_MHZ APB1_MHZ
 
 /* I2C error ISR. */
 #define I2C_ERROR_IRQ 34
@@ -65,30 +64,26 @@ void IRQ_34(void) __attribute__((alias("IRQ_i2c_error")));
 #define I2C_EVENT_IRQ 33
 void IRQ_33(void) __attribute__((alias("IRQ_i2c_event")));
 
-/* DMA1 Stream 7, Channel 7 -> I2C2_TX */
+/* DMA channel 7 on DMA1: Stream7 = I2C2_TX, Stream3 = I2C2_RX (RM0383). */
+#define DMA_I2C2_CH 7
+
+/* DMA Tx. */
 #define DMA_TX_STREAM 7
-#define DMA_TX_CH 7
 #define i2c_tx_dma dma1->stream[DMA_TX_STREAM]
+#define dma_tx_clear() dma_clear_flags(dma1, DMA_TX_STREAM)
+#define DMA_TX_IRQ DMA1_Stream7_IRQn
+void IRQ_47(void) __attribute__((alias("IRQ_dma_tx_tc")));
 
-/* DMA1 Stream 3, Channel 7 -> I2C2_RX */
+/* DMA Rx. */
 #define DMA_RX_STREAM 3
-#define DMA_RX_CH 7
 #define i2c_rx_dma dma1->stream[DMA_RX_STREAM]
+#define dma_rx_clear() dma_clear_flags(dma1, DMA_RX_STREAM)
+#define DMA_RX_IRQ DMA1_Stream3_IRQn
+void IRQ_14(void) __attribute__((alias("IRQ_dma_rx_tc")));
 
-/* SR1 error flags */
-#define I2C_SR1_ERRORS (I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_AF | \
-                        I2C_SR1_OVR  | I2C_SR1_TIMEOUT)
-
-/* APB1 = 50MHz on STM32F411 @ 100MHz.
- * Standard mode 100kHz: CCR = 50MHz / (2 * 100kHz) = 250.
- * TRISE = 50MHz * 1000ns + 1 = 51. */
-#define I2C_CCR_100k  I2C_CCR_CCR(250)
-#define I2C_TRISE_100k 51
-
-/* Fast mode 400kHz, DUTY=0: CCR = 50MHz / (3 * 400kHz) = 42.
- * TRISE = 50MHz * 300ns + 1 = 16. */
-#define I2C_CCR_400k  (I2C_CCR_FS | I2C_CCR_CCR(42))
-#define I2C_TRISE_400k 16
+/* In direct mode the F4 DMA ignores MSIZE and uses PSIZE for both sides, so
+ * transfers must be byte-sized (the F1 driver uses PSIZE=16, MSIZE=8). */
+#define DMA_I2C_CR (DMA_CR_CHSEL(DMA_I2C2_CH) | DMA_SxCR_MSIZE_8BIT                     | DMA_SxCR_PSIZE_8BIT | DMA_SxCR_MINC | DMA_SxCR_TCIE)
 
 bool_t has_osd;
 uint8_t osd_buttons_tx;
@@ -106,32 +101,34 @@ static uint8_t i2c_row;
 static bool_t is_oled_display;
 static uint8_t oled_height;
 
-/* Tracks whether current DMA transfer is RX or TX, for the event ISR. */
-static bool_t i2c_dma_rd;
-
 #define OLED_ADDR 0x3c
 enum { OLED_unknown, OLED_ssd1306, OLED_sh1106 };
 static uint8_t oled_model;
 static void oled_init(void);
 static unsigned int oled_prep_buffer(void);
 
-#define I2C_RD TRUE
-#define I2C_WR FALSE
-static void i2c_start(uint8_t a, unsigned int nr, bool_t rd);
+static void i2c_stop(void);
 
-static void i2c_tx_tc(void);
-static void i2c_rx_tc(void);
+static void dma_tx_tc_btf(void);
 
+/* Count of display-refresh completions. For synchronisation/flush. */
 static volatile uint8_t refresh_count;
 
+/* I2C data buffer. Data is DMAed to the I2C peripheral. */
 static uint8_t buffer[256] aligned(4);
+
+/* Text buffer, rendered into I2C data and placed into buffer[]. */
 static char text[4][40];
 
+/* Columns and rows of text. */
 uint8_t lcd_columns, lcd_rows;
 
+/* Current display mode: Affects row ordering and sizing. */
 uint8_t display_mode = DM_banner;
 #define menu_mode (display_mode == DM_menu)
 
+/* Occasionally the I2C/DMA engine seems to get stuck. Detect this with 
+ * a timeout timer and unwedge it by calling the I2C error handler. */
 #define DMA_TIMEOUT time_ms(200)
 static struct timer timeout_timer;
 static void timeout_fn(void *unused)
@@ -142,124 +139,73 @@ static void timeout_fn(void *unused)
 /* I2C Error ISR: Reset the peripheral and reinit everything. */
 static void IRQ_i2c_error(void)
 {
-    /* Read and clear SR1 error flags (write 0 to clear). */
-    uint16_t sr1 = i2c->sr1;
-    printk("I2C: Error (%04x)\n", (uint16_t)(sr1 & I2C_SR1_ERRORS));
-    i2c->sr1 = sr1 & ~I2C_SR1_ERRORS;
+    /* Dump and clear I2C errors. */
+    printk("I2C: Error (%04x)\n", (uint16_t)(i2c->sr1 & I2C_SR1_ERRORS));
+    i2c->sr1 &= ~I2C_SR1_ERRORS;
 
-    /* Reset the I2C peripheral via SWRST. */
-    i2c->cr1 = I2C_CR1_SWRST;
+    /* Clear the I2C peripheral. */
     i2c->cr1 = 0;
+    i2c->cr1 = I2C_CR1_SWRST;
 
-    /* Clear DMA channels. */
-    i2c_tx_dma.cr = i2c_rx_dma.cr = 0;
+    /* Clear the DMA controller. */
+    dma_stream_disable(i2c_tx_dma);
+    dma_stream_disable(i2c_rx_dma);
+    dma_tx_clear();
+    dma_rx_clear();
 
     timer_cancel(&timeout_timer);
 
     lcd_init();
 }
 
-/*
- * I2C Event ISR.
- *
- * On I2C v1 the DMA handles the data bytes. We only need the event ISR to:
- *  - detect ADDR (start+address ACKed): clear by reading SR1 then SR2
- *  - detect BTF/STOPF after last DMA byte (DMA sets CR2_LAST so the
- *    peripheral generates NACK+STOP automatically on the final RX byte,
- *    and we get a BTF on TX after the last byte).
- *  - detect AF (NACK from slave) as an error.
- */
 static void IRQ_i2c_event(void)
 {
     uint16_t sr1 = i2c->sr1;
 
-    if (sr1 & I2C_SR1_ERRORS) {
-        IRQx_set_pending(I2C_ERROR_IRQ);
-        return;
+    if (sr1 & I2C_SR1_SB) {
+        /* Send address. Clears SR1_SB. */
+        uint8_t a = in_osd ? OSD_I2C_ADDR : i2c_addr;
+        a <<= 1;
+        if (in_osd == OSD_read)
+            a |= 1;
+        i2c->dr = a;
     }
 
     if (sr1 & I2C_SR1_ADDR) {
-        /* Clear ADDR flag by reading SR1 (done) then SR2. */
+        /* Read SR2 clears SR1_ADDR. */
         (void)i2c->sr2;
-        return;
+        /* No more events: data phase is driven by DMA. */
+        i2c->cr2 &= ~I2C_CR2_ITEVTEN;
     }
 
     if (sr1 & I2C_SR1_BTF) {
-        /* TX: all bytes sent, DMA complete - generate STOP. */
-        if (!i2c_dma_rd) {
-            i2c->cr1 |= I2C_CR1_STOP;
-            i2c_tx_tc();
-        }
-        return;
-    }
-
-    if (sr1 & I2C_SR1_STOPF) {
-        /* RX stop detected (set by hardware after NACK on last byte). */
-        /* Clear STOPF: read SR1 (done above) then write CR1. */
-        i2c->cr1 |= I2C_CR1_PE;
-        i2c_rx_tc();
+        /* DMA transfer fully complete: I2C is now idle. Disable further events
+         * and return control to the DMA pipeline. */
+        i2c->cr2 &= ~I2C_CR2_ITEVTEN;
+        dma_tx_tc_btf();
     }
 }
 
 /* Start an I2C DMA sequence. */
 static void dma_start(unsigned int sz)
 {
-    unsigned int addr = in_osd ? OSD_I2C_ADDR : i2c_addr;
-
     ASSERT(sz <= sizeof(buffer));
 
-    i2c_dma_rd = (in_osd == OSD_read);
-
-    /* Disable I2C before reconfiguring. */
-    i2c->cr1 &= ~I2C_CR1_PE;
-
-    if (i2c_dma_rd) {
-
-        /* RX path */
-        i2c_rx_dma.cr = 0;
+    if (in_osd == OSD_read) {
+        dma_rx_clear();
         i2c_rx_dma.ndtr = sz;
-        i2c_rx_dma.m0ar = (uint32_t)(unsigned long)buffer;
-        i2c_rx_dma.par  = (uint32_t)(unsigned long)&i2c->dr;
-        i2c_rx_dma.cr   = (DMA_CR_CHSEL(DMA_RX_CH)   |
-                           DMA_SxCR_MSIZE_8BIT  |
-                           DMA_SxCR_PSIZE_8BIT  |
-                           DMA_SxCR_MINC        |
-                           DMA_SxCR_DIR_P2M     |
-                           DMA_SxCR_EN);
-
-
-        /* Enable I2C with DMA, ACK, LAST (auto-NACK on last byte). */
-        i2c->cr1 = (I2C_CR1_PE | I2C_CR1_ACK);
-        i2c->cr2 = (I2C_CR2_FREQ(50) | I2C_CR2_DMAEN |
-                    I2C_CR2_LAST    | I2C_CR2_ITEVTEN |
-                    I2C_CR2_ITERREN);
-
+        i2c_rx_dma.cr = DMA_I2C_CR | DMA_SxCR_DIR_P2M | DMA_SxCR_EN;
     } else {
-
-        /* TX path */
-        i2c_tx_dma.cr = 0;
+        dma_tx_clear();
         i2c_tx_dma.ndtr = sz;
-        i2c_tx_dma.m0ar = (uint32_t)(unsigned long)buffer;
-        i2c_tx_dma.par  = (uint32_t)(unsigned long)&i2c->dr;
-        i2c_tx_dma.cr   = (DMA_CR_CHSEL(DMA_TX_CH)   |
-                           DMA_SxCR_MSIZE_8BIT  |
-                           DMA_SxCR_PSIZE_8BIT  |
-                           DMA_SxCR_MINC        |
-                           DMA_SxCR_DIR_M2P     |
-                           DMA_SxCR_EN);
-
-        /* Enable I2C with DMA. */
-        i2c->cr1 = I2C_CR1_PE;
-        i2c->cr2 = (I2C_CR2_FREQ(50) | I2C_CR2_DMAEN |
-                    I2C_CR2_ITEVTEN  | I2C_CR2_ITERREN);
+        i2c_tx_dma.cr = DMA_I2C_CR | DMA_SxCR_DIR_M2P | DMA_SxCR_EN;
     }
 
-    /* Kick off the START condition (triggers SB -> ADDR -> DMA). */
-    i2c_start(addr, sz, i2c_dma_rd);
-
+    /* Set the timeout timer in case the DMA hangs for any reason. */
     timer_set(&timeout_timer, time_now() + DMA_TIMEOUT);
 }
 
+/* Emit a 4-bit command to the HD44780 via the DMA buffer. */
 static void emit4(uint8_t **p, uint8_t val)
 {
     *(*p)++ = val;
@@ -267,6 +213,7 @@ static void emit4(uint8_t **p, uint8_t val)
     *(*p)++ = val;
 }
 
+/* Emit an 8-bit command to the HD44780 via the DMA buffer. */
 static void emit8(uint8_t **p, uint8_t val, uint8_t signals)
 {
     signals |= _bl;
@@ -274,6 +221,7 @@ static void emit8(uint8_t **p, uint8_t val, uint8_t signals)
     emit4(p, (val << 4) | signals);
 }
 
+/* Snapshot text buffer into the command buffer. */
 static unsigned int osd_prep_buffer(void)
 {
     uint16_t order = menu_mode ? 0x7903 : 0x7183;
@@ -283,7 +231,8 @@ static unsigned int osd_prep_buffer(void)
     int i;
 
     if (++in_osd == OSD_read) {
-        memset(buffer, 0x11, sizeof(struct i2c_osd_info));
+        i2c->cr2 |= I2C_CR2_LAST | I2C_CR2_ITEVTEN;
+        i2c->cr1 |= I2C_CR1_ACK | I2C_CR1_START;
         return sizeof(struct i2c_osd_info);
     }
 
@@ -293,9 +242,12 @@ static unsigned int osd_prep_buffer(void)
 
     heights = rows = 0;
     for (i = 3; i >= 0; i--) {
+        /* Iterate over rows, bottom to top. */
         row = order >> (i<<2);
+        /* Skip all trailing empty rows. */
         if ((rows == 0) && ((row&7) == 7))
             continue;
+        /* Count this row and check if it is double height. */
         rows++;
         heights <<= 1;
         if (row & 8)
@@ -318,10 +270,13 @@ static unsigned int osd_prep_buffer(void)
         refresh_count++;
 
     in_osd = OSD_write;
+    i2c->cr2 |= I2C_CR2_ITEVTEN;
+    i2c->cr1 |= I2C_CR1_START;
 
     return q - buffer;
 }
 
+/* Snapshot text buffer into the command buffer. */
 static unsigned int lcd_prep_buffer(void)
 {
     const static uint8_t row_offs[] = { 0x00, 0x40, 0x14, 0x54 };
@@ -332,13 +287,18 @@ static unsigned int lcd_prep_buffer(void)
 
     if (i2c_row == lcd_rows) {
         i2c_row++;
-        if (has_osd)
+        if (has_osd) {
+            i2c_stop();
             return osd_prep_buffer();
+        }
     }
 
     if (i2c_row > lcd_rows) {
         i2c_row = 0;
         refresh_count++;
+        i2c_stop();
+        i2c->cr2 |= I2C_CR2_ITEVTEN;
+        i2c->cr1 |= I2C_CR1_START;
     }
 
     order = (lcd_rows == 2) ? 0x7710 : 0x2103;
@@ -357,12 +317,31 @@ static unsigned int lcd_prep_buffer(void)
     return q - buffer;
 }
 
-static void i2c_tx_tc(void)
+static void IRQ_dma_tx_tc(void)
+{
+    /* Clear the DMA controller. */
+    dma_stream_disable(i2c_tx_dma);
+    dma_tx_clear();
+
+    /* Wait for BTF. We then get called back on dma_tx_tc_btf().
+     *
+     * Q: Why do we always wait for BTF, even if we're issuing another DMA?
+     * A: Otherwise the start of next DMA races BTF. If we lose that race, BTF
+     * is set for the rest of the transfer (since we don't read SR1) and a
+     * wait for BTF at the end of the final DMA transfer would erroneously
+     * succeed immediately. We would then STOP too early and lose the last
+     * byte of the transfer. */
+    i2c->cr2 |= I2C_CR2_ITEVTEN;
+}
+
+static void dma_tx_tc_btf(void)
 {
     unsigned int dma_sz;
 
+    /* Prepare the DMA buffer and start the next DMA sequence. */
     in_osd = OSD_no;
     if (i2c_addr == 0) {
+        i2c_stop();
         dma_sz = osd_prep_buffer();
     } else {
         dma_sz = is_oled_display ? oled_prep_buffer() : lcd_prep_buffer();
@@ -370,26 +349,35 @@ static void i2c_tx_tc(void)
     dma_start(dma_sz);
 }
 
-static void i2c_rx_tc(void)
+static void IRQ_dma_rx_tc(void)
 {
     struct i2c_osd_info *info = (struct i2c_osd_info *)buffer;
 
+    /* Clear the DMA controller. */
+    dma_stream_disable(i2c_rx_dma);
+    dma_rx_clear();
+
+    /* Clean up I2C. */
+    i2c->cr2 &= ~I2C_CR2_LAST;
+    i2c->cr1 &= ~I2C_CR1_ACK;
+
     osd_buttons_rx = info->buttons;
 
+    /* Now do the OSD write. */
     dma_start(osd_prep_buffer());
 }
 
-/* Wait for SR1 flag(s) while checking for errors. */
-static bool_t i2c_wait(uint16_t s)
+/* Wait for given status condition @s while also checking for errors. */
+static bool_t i2c_wait(uint8_t s)
 {
     stk_time_t t = stk_now();
-    
     while ((i2c->sr1 & s) != s) {
         if (i2c->sr1 & I2C_SR1_ERRORS) {
-            i2c->sr1 = i2c->sr1 & ~I2C_SR1_ERRORS;
+            i2c->sr1 &= ~I2C_SR1_ERRORS;
             return FALSE;
         }
         if (stk_diff(t, stk_now()) > stk_ms(10)) {
+            /* I2C bus seems to be locked up. */
             i2c_dead = TRUE;
             return FALSE;
         }
@@ -397,107 +385,55 @@ static bool_t i2c_wait(uint16_t s)
     return TRUE;
 }
 
-/*
- * Initiate an I2C transfer (synchronous START + address phase).
- * On I2C v1: set START, wait for SB, write address byte to DR,
- * wait for ADDR, then clear by reading SR2.
- */
-static void i2c_start(uint8_t a, unsigned int nr, bool_t rd)
+/* Synchronously transmit the I2C START sequence. 
+ * Caller must already have asserted I2C_CR1_START. */
+#define I2C_RD TRUE
+#define I2C_WR FALSE
+static bool_t i2c_start(uint8_t a, bool_t rd)
 {
-    /* Generate START condition. */
-    i2c->cr1 |= I2C_CR1_START;
-
-    /* Wait for SB (start bit sent). */
     if (!i2c_wait(I2C_SR1_SB))
-        return;
-
-    /* Send address byte: LSB=1 for read, LSB=0 for write. */
-    i2c->dr = (a << 1) | (rd ? 1 : 0);
-
-    /* Wait for ADDR (address ACKed by slave). */
+        return FALSE;
+    i2c->dr = (a << 1) | rd;
     if (!i2c_wait(I2C_SR1_ADDR))
-        return;
-
-    /* Clear ADDR flag: read SR1 (done in i2c_wait) then SR2. */
+        return FALSE;
     (void)i2c->sr2;
-}
-
-/* Synchronously generate STOP and wait for bus idle. */
-static bool_t i2c_stop(void)
-{
-    stk_time_t t = stk_now();
-
-    i2c->cr1 |= I2C_CR1_STOP;
-    /* Wait until STOP condition is cleared by hardware (bus free). */
-    while (i2c->cr1 & I2C_CR1_STOP) {
-        if (stk_diff(t, stk_now()) > stk_ms(10)) {
-            i2c_dead = TRUE;
-            return FALSE;
-        }
-    }
     return TRUE;
 }
 
-/* Synchronously transmit one byte. */
+/* Synchronously transmit the I2C STOP sequence. */
+static void i2c_stop(void)
+{
+    i2c->cr1 |= I2C_CR1_STOP;
+    while (i2c->cr1 & I2C_CR1_STOP)
+        continue;
+    if (is_artery_mcu) {
+        i2c->cr1 = 0;
+        i2c->cr1 = I2C_CR1_PE;
+    }
+}
+
+/* Synchronously transmit an I2C byte. */
 static bool_t i2c_sync_write(uint8_t b)
 {
-    if (!i2c_wait(I2C_SR1_TXE))
-        return FALSE;
     i2c->dr = b;
-    return TRUE;
-}
-
-/* Synchronously receive one byte. */
-static bool_t i2c_sync_read(uint8_t *pb)
-{
-    if (!i2c_wait(I2C_SR1_RXNE))
-        return FALSE;
-    *pb = i2c->dr;
-    return TRUE;
+    return i2c_wait(I2C_SR1_BTF);
 }
 
 static bool_t i2c_sync_write_txn(uint8_t addr, uint8_t *cmds, unsigned int nr)
 {
     unsigned int i;
 
-    /* Set up for synchronous TX (no DMA, no IRQ). */
-    i2c->cr1 = I2C_CR1_PE;
-    i2c->cr2 = I2C_CR2_FREQ(50);
-
-    i2c_start(addr, nr, I2C_WR);
+    if (!i2c_start(addr, I2C_WR))
+        return FALSE;
 
     for (i = 0; i < nr; i++)
         if (!i2c_sync_write(*cmds++))
             return FALSE;
 
-    /* Wait for BTF (last byte fully shifted out) before STOP. */
-    if (!i2c_wait(I2C_SR1_BTF))
-        return FALSE;
-
-    return i2c_stop();
-}
-
-static bool_t i2c_sync_read_txn(uint8_t addr, uint8_t *rsp, unsigned int nr)
-{
-    unsigned int i;
-
-    i2c->cr1 = (I2C_CR1_PE | I2C_CR1_ACK);
-    i2c->cr2 = I2C_CR2_FREQ(50);
-
-    i2c_start(addr, nr, I2C_RD);
-
-    for (i = 0; i < nr; i++) {
-        /* On last byte: clear ACK and set STOP before reading DR,
-         * so the peripheral NACKs the last byte as required by I2C. */
-        if (i == (nr - 1))
-            i2c->cr1 = (I2C_CR1_PE | I2C_CR1_STOP);
-        if (!i2c_sync_read(rsp + i))
-            return FALSE;
-    }
-
     return TRUE;
 }
 
+/* Write a 4-bit nibble over D7-D4 (4-bit bus). */
 static void write4(uint8_t val)
 {
     i2c_sync_write(val);
@@ -505,29 +441,17 @@ static void write4(uint8_t val)
     i2c_sync_write(val);
 }
 
+/* Check whether an I2C device is responding at given address. */
 static bool_t i2c_probe(uint8_t a)
 {
-    i2c->cr1 = I2C_CR1_PE;
-    i2c->cr2 = I2C_CR2_FREQ(50);
-
     i2c->cr1 |= I2C_CR1_START;
-    if (!i2c_wait(I2C_SR1_SB))
+    if (!i2c_start(a, I2C_WR) || !i2c_sync_write(0))
         return FALSE;
-
-    /* Send address for write; if slave NACKs, AF will be set. */
-    i2c->dr = (a << 1);
-    if (!i2c_wait(I2C_SR1_ADDR)) {
-        /* Clear AF. */
-        i2c->sr1 = i2c->sr1 & ~I2C_SR1_AF;
-        i2c->cr1 |= I2C_CR1_STOP;
-        return FALSE;
-    }
-    (void)i2c->sr2;
-
-    i2c->cr1 |= I2C_CR1_STOP;
+    i2c_stop();
     return TRUE;
 }
 
+/* Check given inclusive range of addresses for a responding I2C device. */
 static uint8_t i2c_probe_range(uint8_t s, uint8_t e)
 {
     uint8_t a;
@@ -552,6 +476,7 @@ void lcd_write(int col, int row, int min, const char *str)
 
     p = &text[row][col];
 
+    /* Prevent the text[] getting rendered while we're updating it. */
     oldpri = IRQ_save(I2C_IRQ_PRI);
 
     while ((c = *str++) && (col++ < lcd_columns)) {
@@ -566,6 +491,7 @@ void lcd_write(int col, int row, int min, const char *str)
 
 void lcd_backlight(bool_t on)
 {
+    /* Will be picked up the next time text[] is rendered. */
     _bl = on ? _BL : 0;
 }
 
@@ -588,54 +514,66 @@ bool_t lcd_init(void)
 
     rcc->apb1enr |= RCC_APB1ENR_I2C2EN;
 
-    gpio_configure_pin(i2c_gpio, SCL, GPO_opendrain(_2MHz, HIGH));
-    gpio_configure_pin(i2c_gpio, SDA, GPO_opendrain(_2MHz, HIGH));
+    /* Check we have a clear I2C bus. Both clock and data must be high. If SDA 
+     * is stuck low then slave may be stuck in an ACK cycle. We can try to 
+     * unwedge the slave in that case and drive it into the STOP condition. */
+    gpio_configure_pin(gpiob, SCL, GPO_opendrain(_2MHz, HIGH));
+    gpio_configure_pin(gpiob, SDA, GPO_opendrain(_2MHz, HIGH));
     delay_us(10);
-    if (gpio_read_pin(i2c_gpio, SCL) && !gpio_read_pin(i2c_gpio, SDA)) {
+    if (gpio_read_pin(gpiob, SCL) && !gpio_read_pin(gpiob, SDA)) {
         printk("I2C: SDA held by slave? Fixing... ");
-        gpio_write_pin(i2c_gpio, SDA, FALSE);
-        gpio_write_pin(i2c_gpio, SCL, FALSE);
+        /* We will hold SDA low (as slave is) and also drive SCL low to end 
+         * the current ACK cycle. */
+        gpio_write_pin(gpiob, SDA, FALSE);
+        gpio_write_pin(gpiob, SCL, FALSE);
         delay_us(10);
-        gpio_write_pin(i2c_gpio, SCL, TRUE);
+        /* Slave should no longer be driving SDA low (but we still are).
+         * Now prepare for the STOP condition by setting SCL high. */
+        gpio_write_pin(gpiob, SCL, TRUE);
         delay_us(10);
-        gpio_write_pin(i2c_gpio, SDA, TRUE);
+        /* Enter the STOP condition by setting SDA high while SCL is high. */
+        gpio_write_pin(gpiob, SDA, TRUE);
         delay_us(10);
         printk("%s\n",
-               !gpio_read_pin(i2c_gpio, SCL) || !gpio_read_pin(i2c_gpio, SDA)
+               !gpio_read_pin(gpiob, SCL) || !gpio_read_pin(gpiob, SDA)
                ? "Still held" : "Done");
     }
 
+    /* Check the bus is not floating (or still stuck!). We shouldn't be able to 
+     * pull the lines low with our internal weak pull-downs (min. 30kohm). */
     if (!reinit) {
         bool_t scl, sda;
-        gpio_configure_pin(i2c_gpio, SCL, GPI_pull_down);
-        gpio_configure_pin(i2c_gpio, SDA, GPI_pull_down);
+        gpio_configure_pin(gpiob, SCL, GPI_pull_down);
+        gpio_configure_pin(gpiob, SDA, GPI_pull_down);
         delay_us(10);
-        scl = gpio_read_pin(i2c_gpio, SCL);
-        sda = gpio_read_pin(i2c_gpio, SDA);
+        scl = gpio_read_pin(gpiob, SCL);
+        sda = gpio_read_pin(gpiob, SDA);
         if (!scl || !sda) {
             printk("I2C: Invalid bus SCL=%u SDA=%u\n", scl, sda);
             goto fail;
         }
     }
 
-    gpio_set_af(i2c_gpio, SCL, SCL_AF);
-    gpio_set_af(i2c_gpio, SDA, SDA_AF);
-    gpio_configure_pin(i2c_gpio, SCL, AFO_opendrain(_2MHz));
-    gpio_configure_pin(i2c_gpio, SDA, AFO_opendrain(_2MHz));
+    gpio_set_af(gpiob, SCL, SCL_AF);
+    gpio_set_af(gpiob, SDA, SDA_AF);
+    gpio_configure_pin(gpiob, SCL, AFO_opendrain(_2MHz));
+    gpio_configure_pin(gpiob, SDA, AFO_opendrain(_2MHz));
 
-    /* Reset and configure I2C for Standard Mode (100kHz).
-     * APB1 = 50MHz on STM32F411 @ 100MHz system clock. */
-    i2c->cr1 = I2C_CR1_SWRST;
+    /* Standard Mode (100kHz) */
     i2c->cr1 = 0;
-    i2c->cr2 = I2C_CR2_FREQ(50);
-    i2c->ccr = I2C_CCR_100k;
-    i2c->trise = I2C_TRISE_100k;
+    i2c->cr2 = I2C_CR2_FREQ(PCLK_MHZ);
+    i2c->ccr = I2C_CCR_CCR(PCLK_MHZ*5);
+    i2c->trise = (PCLK_MHZ <= 62) ? PCLK_MHZ + 1 : 63;
     i2c->cr1 = I2C_CR1_PE;
 
     if (!reinit) {
 
+        /* First probe after I2C re-initialisation seems to fail, and so we 
+         * fail to detect FF OSD. So issue a dummy probe first. */
         (void)i2c_probe(0);
 
+        /* Probe the bus for I2C devices: We support a single LCD/OLED plus 
+         * an FF OSD device. */
         has_osd = i2c_probe(OSD_I2C_ADDR);
         a = i2c_probe_range(0x20, 0x27) ?: i2c_probe_range(0x38, 0x3f);
         if ((a == 0) && (i2c_dead || !has_osd
@@ -646,8 +584,12 @@ bool_t lcd_init(void)
             goto fail;
         }
 
+        /* Probe the FF OSD device if we found one. */
         if (has_osd) {
-            (void)i2c_sync_read_txn(OSD_I2C_ADDR, &osd_ver, 1);
+            /* Read: Retrieve the version number. */
+            i2c->cr1 |= I2C_CR1_START;
+            if (i2c_start(OSD_I2C_ADDR, I2C_RD) && i2c_wait(I2C_SR1_RXNE))
+                osd_ver = i2c->dr;
             printk("I2C: FF OSD found (ver %x)\n", osd_ver);
         }
 
@@ -681,6 +623,7 @@ bool_t lcd_init(void)
         lcd_rows = min_t(uint8_t, lcd_rows, 4);
 
         lcd_clear();
+
     }
 
     /* Enable the Event IRQ. */
@@ -692,18 +635,29 @@ bool_t lcd_init(void)
     IRQx_set_prio(I2C_ERROR_IRQ, I2C_IRQ_PRI);
     IRQx_clear_pending(I2C_ERROR_IRQ);
     IRQx_enable(I2C_ERROR_IRQ);
+    i2c->cr2 |= I2C_CR2_ITERREN;
 
-    /* STM32F411: DMA1 ch4=I2C2_TX, ch5=I2C2_RX — no DMAMUX needed. */
-
-    /* Initialise DMA1 channel 4 for I2C2 TX. */
+    /* Initialise DMA1 Stream7 (I2C2_TX) and its completion interrupt. */
+    dma_stream_disable(i2c_tx_dma);
     i2c_tx_dma.m0ar = (uint32_t)(unsigned long)buffer;
     i2c_tx_dma.par = (uint32_t)(unsigned long)&i2c->dr;
+    i2c_tx_dma.fcr = 0; /* direct mode */
+    dma_tx_clear();
+    IRQx_set_prio(DMA_TX_IRQ, I2C_IRQ_PRI);
+    IRQx_clear_pending(DMA_TX_IRQ);
+    IRQx_enable(DMA_TX_IRQ);
 
-    /* Initialise DMA1 channel 5 for I2C2 RX. */
+    /* Initialise DMA1 Stream3 (I2C2_RX) and its completion interrupt. */
+    dma_stream_disable(i2c_rx_dma);
     i2c_rx_dma.m0ar = (uint32_t)(unsigned long)buffer;
     i2c_rx_dma.par = (uint32_t)(unsigned long)&i2c->dr;
+    i2c_rx_dma.fcr = 0; /* direct mode */
+    dma_rx_clear();
+    IRQx_set_prio(DMA_RX_IRQ, I2C_IRQ_PRI);
+    IRQx_clear_pending(DMA_RX_IRQ);
+    IRQx_enable(DMA_RX_IRQ);
 
-    /* Timeout handler. */
+    /* Timeout handler for if I2C transmission borks. */
     timer_init(&timeout_timer, timeout_fn, NULL);
     timer_set(&timeout_timer, time_now() + DMA_TIMEOUT);
 
@@ -711,32 +665,33 @@ bool_t lcd_init(void)
         oled_init();
         return TRUE;
     } else if (i2c_addr == 0) {
+        i2c->cr2 |= I2C_CR2_DMAEN;
         dma_start(osd_prep_buffer());
         return TRUE;
     }
 
-    /* Initialise 4-bit HD44780 interface synchronously. */
-    i2c->cr1 = I2C_CR1_PE;
-    i2c->cr2 = I2C_CR2_FREQ(50);
-    i2c_start(i2c_addr, 4*3, I2C_WR);
+    i2c->cr1 |= I2C_CR1_START;
+    if (!i2c_start(i2c_addr, I2C_WR))
+        goto fail;
+
+    /* Initialise 4-bit interface, as in the datasheet. Do this synchronously
+     * and with the required delays. */
     write4(3 << 4);
     delay_us(4100);
     write4(3 << 4);
     delay_us(100);
     write4(3 << 4);
     write4(2 << 4);
-    if (!i2c_wait(I2C_SR1_BTF))
-        goto fail;
-    i2c_stop();
 
-    /* More initialisation. Send by DMA. */
+    /* More initialisation from the datasheet. Send by DMA. */
     p = buffer;
     emit8(&p, CMD_FUNCTIONSET | FS_2LINE, 0);
     emit8(&p, CMD_DISPLAYCTL, 0);
     emit8(&p, CMD_ENTRYMODE | 2, 0);
-    emit8(&p, CMD_DISPLAYCTL | 4, 0);
+    emit8(&p, CMD_DISPLAYCTL | 4, 0); /* display on */
+    i2c->cr2 |= I2C_CR2_DMAEN;
     dma_start(p - buffer);
-
+    
     if (!reinit)
         lcd_backlight(TRUE);
 
@@ -747,15 +702,14 @@ fail:
         return FALSE;
     IRQx_disable(I2C_EVENT_IRQ);
     IRQx_disable(I2C_ERROR_IRQ);
-    i2c->cr1 = I2C_CR1_SWRST;
-    i2c->cr1 = 0;
-    gpio_configure_pin(i2c_gpio, SCL, GPI_pull_up);
-    gpio_configure_pin(i2c_gpio, SDA, GPI_pull_up);
+    IRQx_disable(DMA_TX_IRQ);
+    IRQx_disable(DMA_RX_IRQ);
+    i2c->cr1 &= ~I2C_CR1_PE;
+    gpio_configure_pin(gpiob, SCL, GPI_pull_up);
+    gpio_configure_pin(gpiob, SDA, GPI_pull_up);
     rcc->apb1enr &= ~RCC_APB1ENR_I2C2EN;
     return FALSE;
 }
-
-/* ---- OLED section: unchanged from AT32F435 version ---- */
 
 extern const uint8_t oled_font_6x13[];
 static void oled_convert_text_row_6x13(char *pc)
@@ -777,6 +731,7 @@ static void oled_convert_text_row_6x13(char *pc)
         q += w;
     }
 
+    /* Fill remainder of buffer[] with zeroes. */
     memset(q, 0, 127-lcd_columns*w);
     memset(q+128, 0, 127-lcd_columns*w);
 }
@@ -817,7 +772,7 @@ static unsigned int oled_queue_cmds(
     uint8_t *p = buf;
 
     while (nr--) {
-        *p++ = 0x80;
+        *p++ = 0x80; /* Co=1, Command */
         *p++ = *cmds++;
     }
 
@@ -866,37 +821,46 @@ static void oled_double_height(uint8_t *dst, uint8_t *src, uint8_t mask)
 static unsigned int oled_start_i2c(uint8_t *buf)
 {
     static const uint8_t ssd1306_addr_cmds[] = {
-        0x20, 0,
-        0x21, 0, 127,
-        0x22,
+        0x20, 0,      /* horizontal addressing mode */
+        0x21, 0, 127, /* column address range: 0-127 */
+        0x22, 0, 7,   /* page address range: 0-7 */
     }, ztech_addr_cmds[] = {
-        0xda, 0x12,
-        0x21, 4, 131,
+        0xda, 0x12,   /* alternate com pins config */
+        0x21, 4, 131, /* column address range: 4-131 */
     }, sh1106_addr_cmds[] = {
-        0x10
+        0x10          /* column address high nibble is zero */
     };
 
     uint8_t dynamic_cmds[4], *dc = dynamic_cmds;
     uint8_t *p = buf;
 
+    /* Set up the display address range. */
     if (oled_model == OLED_sh1106) {
         p += oled_queue_cmds(p, sh1106_addr_cmds, sizeof(sh1106_addr_cmds));
+        /* Column address: 0 or 2 (seems 128x64 displays are shifted by 2). */
         *dc++ = (oled_height == 64) ? 0x02 : 0x00;
+        /* Page address: according to i2c_row. */
         *dc++ = 0xb0 + i2c_row;
     } else {
         p += oled_queue_cmds(p, ssd1306_addr_cmds, sizeof(ssd1306_addr_cmds));
-        *dc++ = i2c_row;
-        *dc++ = 7;
     }
 
+    /* Display on/off according to backlight setting. */
     *dc++ = _bl ? 0xaf : 0xae;
 
     p += oled_queue_cmds(p, dynamic_cmds, dc - dynamic_cmds);
 
+    /* ZHONGJY_TECH 2.23" 128x32 display based on SSD1305 controller. 
+     * It has alternate COM pin mapping and is offset horizontally. */
     if (ff_cfg.display_type & DISPLAY_ztech)
         p += oled_queue_cmds(p, ztech_addr_cmds, sizeof(ztech_addr_cmds));
 
+    /* All subsequent bytes are data bytes. */
     *p++ = 0x40;
+
+    /* Start the I2C transaction. */
+    i2c->cr2 |= I2C_CR2_ITEVTEN;
+    i2c->cr1 |= I2C_CR1_START;
 
     return p - buf;
 }
@@ -919,6 +883,7 @@ static int oled_to_lcd_row(int in_row)
         order >>= DORD_shift;
     }
 
+    /* Remap the row */
     row = order & DORD_row;
     if (row < lcd_rows) {
         oled_convert_text_row(text[row]);
@@ -929,15 +894,49 @@ static int oled_to_lcd_row(int in_row)
     return large ? i - in_row : 0;
 }
 
-static unsigned int oled_prep_buffer(void)
+static unsigned int ssd1306_prep_buffer(void)
+{
+    int size;
+
+    /* If we have completed a complete fill of the OLED display, start a new 
+     * I2C transaction. The OLED display seems to occasionally silently lose 
+     * a byte and then we lose sync with the display address. */
+    if (i2c_row == (oled_height / 16)) {
+        i2c_row++;
+        if (has_osd) {
+            i2c_stop();
+            return osd_prep_buffer();
+        }
+    }
+
+    if (i2c_row > (oled_height / 16)) {
+        i2c_row = 0;
+        refresh_count++;
+        i2c_stop();
+        return oled_start_i2c(buffer);
+    }
+
+    /* Convert one row of text[] into buffer[] writes. */
+    size = oled_to_lcd_row(i2c_row);
+    if (size != 0)
+        oled_double_height(buffer, &buffer[(size == 1) ? 128 : 0], 0x3);
+
+    i2c_row++;
+
+    return 256;
+}
+
+static unsigned int sh1106_prep_buffer(void)
 {
     int size;
     uint8_t *p = buffer;
 
     if (i2c_row == (oled_height / 8)) {
         i2c_row++;
-        if (has_osd)
+        if (has_osd) {
+            i2c_stop();
             return osd_prep_buffer();
+        }
     }
 
     if (i2c_row > (oled_height / 8)) {
@@ -945,6 +944,7 @@ static unsigned int oled_prep_buffer(void)
         refresh_count++;
     }
 
+    /* Convert one row of text[] into buffer[] writes. */
     size = oled_to_lcd_row(i2c_row/2);
     if (size != 0) {
         oled_double_height(&buffer[128], &buffer[(size == 1) ? 128 : 0],
@@ -954,8 +954,11 @@ static unsigned int oled_prep_buffer(void)
             memcpy(&buffer[128], &buffer[0], 128);
     }
 
+    /* Every 8 rows needs a new page address and hence new I2C transaction. */
+    i2c_stop();
     p += oled_start_i2c(p);
 
+    /* Patch the data bytes onto the end of the address setup sequence. */
     memcpy(p, &buffer[128], 128);
     p += 128;
 
@@ -964,28 +967,51 @@ static unsigned int oled_prep_buffer(void)
     return p - buffer;
 }
 
+/* Snapshot text buffer into the bitmap buffer. */
+static unsigned int oled_prep_buffer(void)
+{
+    return (oled_model == OLED_sh1106)
+        ? sh1106_prep_buffer()
+        : ssd1306_prep_buffer();
+}
+
 static bool_t oled_probe_model(void)
 {
-    uint8_t cmd1[] = { 0x80, 0x00, 0xc0 };
-    uint8_t cmd2[] = { 0x80, 0x00, 0xc0, 0x00 };
-    uint8_t rsp[2];
+    uint8_t cmd1[] = { 0x80, 0x00, /* Column 0 */
+                       0xc0 };     /* Read one data */
+    uint8_t cmd2[] = { 0x80, 0x00, /* Column 0 */
+                       0xc0, 0x00 }; /* Write one data */
+
     int i;
     uint8_t x, px = 0;
     uint8_t *rand = (uint8_t *)emit8;
 
     for (i = 0; i < 3; i++) {
+        /* 1st Write stage. */
+        i2c->cr1 |= I2C_CR1_START;
         if (!i2c_sync_write_txn(i2c_addr, cmd1, sizeof(cmd1)))
             goto fail;
-        if (!i2c_sync_read_txn(i2c_addr, rsp, sizeof(rsp)))
+        /* Read stage. */
+        i2c->cr1 |= I2C_CR1_START | I2C_CR1_ACK;
+        if (!i2c_start(i2c_addr, I2C_RD) || !i2c_wait(I2C_SR1_RXNE))
             goto fail;
-        x = rsp[1];
-        cmd2[3] = x ^ rand[i];
+        i2c->cr1 &= ~I2C_CR1_ACK;  /* NACK and Restart after next byte */
+        i2c->cr1 |= I2C_CR1_START;
+        (void)i2c->dr; /* 1st read: Dummy */
+        if (!i2c_wait(I2C_SR1_RXNE))
+            goto fail;
+        x = i2c->dr; /* 2nd read: Data */
+        /* 2nd Write stage. */
+        cmd2[3] = x ^ rand[i]; /* XOR the write with "randomness" */
         if (!i2c_sync_write_txn(i2c_addr, cmd2, sizeof(cmd2)))
             goto fail;
+        /* Check we read what we wrote on previous iteration. */
         if (i && (x != px))
             break;
+        /* Remember what we wrote, for next iteration. */
         px = cmd2[3];
     }
+    i2c_stop();
 
     oled_model = (i == 3) ? OLED_sh1106 : OLED_ssd1306;
     printk("OLED: %s\n", (oled_model == OLED_sh1106) ? "SH1106" : "SSD1306");
@@ -997,32 +1023,35 @@ fail:
 
 static void oled_init_fast_mode(void)
 {
-    /* Switch to Fast Mode (400kHz). */
+    /* Disable I2C (currently in Standard Mode). */
     i2c->cr1 = 0;
-    i2c->cr2 = I2C_CR2_FREQ(50);
-    i2c->ccr = I2C_CCR_400k;
-    i2c->trise = I2C_TRISE_400k;
+
+    /* Fast Mode (400kHz). */
+    i2c->cr2 = I2C_CR2_FREQ(PCLK_MHZ);
+    i2c->ccr = I2C_CCR_FS | I2C_CCR_CCR(PCLK_MHZ*5/6);
+    i2c->trise = PCLK_MHZ*3/10 + 1;
     i2c->cr1 = I2C_CR1_PE;
+    i2c->cr2 |= I2C_CR2_ITERREN;
 }
 
 static void oled_init(void)
 {
     static const uint8_t init_cmds[] = {
-        0xd5, 0x80,
-        0xd3, 0x00,
-        0x40,
-        0x8d, 0x14,
-        0xda, 0x02,
-        0xd9, 0xf1,
-        0xdb, 0x20,
-        0xa4,
-        0x2e,
+        0xd5, 0x80, /* default clock */
+        0xd3, 0x00, /* display offset = 0 */
+        0x40,       /* display start line = 0 */
+        0x8d, 0x14, /* enable charge pump */
+        0xda, 0x02, /* com pins configuration */
+        0xd9, 0xf1, /* pre-charge period */
+        0xdb, 0x20, /* vcomh detect (default) */
+        0xa4,       /* output follows ram contents */
+        0x2e,       /* deactivate scroll */
     }, norot_cmds[] = {
-        0xa1,
-        0xc8,
+        0xa1,       /* segment mapping (reverse) */
+        0xc8,       /* com scan direction (decrement) */
     }, rot_cmds[] = {
-        0xa0,
-        0xc0,
+        0xa0,       /* segment mapping (default) */
+        0xc0,       /* com scan direction (default) */
     };
     uint8_t dynamic_cmds[7], *dc;
     uint8_t *p = buffer;
@@ -1033,18 +1062,21 @@ static void oled_init(void)
     if ((oled_model == OLED_unknown) && !oled_probe_model())
         goto fail;
 
+    /* Initialisation sequence for SSD1306/SH1106. */
     p += oled_queue_cmds(p, init_cmds, sizeof(init_cmds));
 
+    /* Dynamically-generated initialisation commands. */
     dc = dynamic_cmds;
-    *dc++ = (ff_cfg.display_type & DISPLAY_inverse) ? 0xa7 : 0xa6;
-    *dc++ = 0x81;
+    *dc++ = (ff_cfg.display_type & DISPLAY_inverse) ? 0xa7 : 0xa6; /* Video */
+    *dc++ = 0x81; /* Display Contrast */
     *dc++ = ff_cfg.oled_contrast;
-    *dc++ = 0xa8;
+    *dc++ = 0xa8; /* Multiplex ratio (lcd height - 1) */
     *dc++ = oled_height - 1;
-    *dc++ = 0xda;
+    *dc++ = 0xda; /* COM pins configuration */
     *dc++ = (oled_height == 64) ? 0x12 : 0x02;
     p += oled_queue_cmds(p, dynamic_cmds, dc - dynamic_cmds);
 
+    /* Display orientation. */
     dc = dynamic_cmds;
     memcpy(dc, (ff_cfg.display_type & DISPLAY_rotate) ? rot_cmds : norot_cmds,
            2);
@@ -1052,8 +1084,11 @@ static void oled_init(void)
         dc[0] ^= 1;
     p += oled_queue_cmds(p, dc, 2);
 
+    /* Start off the I2C transaction. */
     p += oled_start_i2c(p);
 
+    /* Send the initialisation command sequence by DMA. */
+    i2c->cr2 |= I2C_CR2_DMAEN;
     dma_start(p - buffer);
     return;
 

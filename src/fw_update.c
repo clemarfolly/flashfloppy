@@ -40,8 +40,9 @@
 #define FIRMWARE_START 0x0800c000
 #define FIRMWARE_END   (0x08040000 - FLASH_PAGE_SIZE)
 #elif MCU == MCU_stm32f411
+/* Sectors 3-6. Sector 7 (0x08060000) holds the config. */
 #define FIRMWARE_START 0x0800c000
-#define FIRMWARE_END   (0x0807C000 - FLASH_PAGE_SIZE)
+#define FIRMWARE_END   0x08060000
 #endif
 #define FILE_PATTERN   "ff_gotek*.upd"
 

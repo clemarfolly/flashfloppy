@@ -30,13 +30,13 @@ void USB_OTG_BSP_Init(USB_OTG_CORE_HANDLE *pdev)
     gpio_set_af(gpioa, 11, 10);
     gpio_set_af(gpioa, 12, 10);
 
-    gpio_configure_pin(gpioa, 11, AFO_pushpull(_10MHz));
-    gpio_configure_pin(gpioa, 12, AFO_pushpull(_10MHz));
+    gpio_configure_pin(gpioa, 11, AFO_pushpull(_50MHz));
+    gpio_configure_pin(gpioa, 12, AFO_pushpull(_50MHz));
 #else
     gpio_set_af(gpioa, 11, 10);
     gpio_set_af(gpioa, 12, 10);
-    gpio_configure_pin(gpioa, 11, AFO_pushpull(_10MHz));
-    gpio_configure_pin(gpioa, 12, AFO_pushpull(_10MHz));
+    gpio_configure_pin(gpioa, 11, AFO_pushpull(_50MHz));
+    gpio_configure_pin(gpioa, 12, AFO_pushpull(_50MHz));
     rcc->misc2 |= RCC_MISC2_USBDIV(USBDIV_6);
     rcc->ahb2enr |= RCC_AHB2ENR_OTGFS1EN; /* OTG clock enable */
 #endif

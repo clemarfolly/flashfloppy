@@ -178,7 +178,9 @@ bool_t board_jc_strapped(void)
 void board_init(void)
 {
     uint16_t pa_skip, pb_skip, pc_skip;
+#if MCU != MCU_stm32f411
     uint8_t id;
+#endif
 
     /* PA0-1,8 (floppy inputs), PA2 (speaker). */
     pa_skip = 0x0107;
@@ -200,6 +202,16 @@ void board_init(void)
     pc_skip = 0x0000;
     gpio_pull_up_pins(gpioc, ~pc_skip);
 
+#if MCU == MCU_stm32f411
+    /* BlackPill (STM32F411CxU6, 48 pins). There are no board-ID straps:
+     * PC13 drives the on-board LED and PC14/PC15 carry the 32kHz crystal.
+     * Pin usage is as a standard 48-pin Gotek:
+     *  Buttons: PA3 = Left, PA4 = Right, PA5 = Select (shared with JA)
+     *  Jumpers: JA = PA5, JB = PA2 (speaker), JC = PB1
+     *  Display: PB10 (SCL/DAT), PB3 (SDA/CLK) -- there is no PB11 */
+    mcu_package = MCU_LQFP48;
+    board_id = BRDREV_Gotek_standard;
+#else
     /* Wait for ID to stabilise at PC[15:12]. */
     delay_us(100);
     id = (gpioc->idr >> 12) & 0xf;
@@ -287,6 +299,7 @@ void board_init(void)
         }
 
     }
+#endif /* MCU != MCU_stm32f411 */
 
 #if TARGET == TARGET_apple2
 #if LEVEL != LEVEL_debug

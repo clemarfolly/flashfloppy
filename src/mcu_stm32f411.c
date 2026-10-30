@@ -4,7 +4,7 @@
  * Core and peripheral registers.
  *
  * Written & released by Keir Fraser <keir.xen@gmail.com>
- * Adapted for STM32F411 by <your name here>
+ * Adapted for STM32F411 (BlackPill)
  *
  * This is free and unencumbered software released into the public domain.
  * See the file COPYING for more details, or visit <http://unlicense.org>.
@@ -18,27 +18,28 @@ unsigned int ram_kb = 128;
 
 static void clock_init(void)
 {
-    /* Flash latency: 3 wait states for 100MHz at 3.3V (RM0383 Table 6). */
-    flash->acr = FLASH_ACR_LATENCY(3) | FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN;
+    /* Flash: 2 wait states for 64-90MHz at 2.7-3.6V (RM0383 Table 6). */
+    flash->acr = (FLASH_ACR_LATENCY(2) | FLASH_ACR_ICEN
+                  | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN);
 
-    /* Start up the external oscillator. */
+    /* Start up the external oscillator (25MHz on BlackPill). */
     rcc->cr |= RCC_CR_HSEON;
     while (!(rcc->cr & RCC_CR_HSERDY))
         cpu_relax();
 
-    /* Configure PLL: HSE=25MHz, PLLM=25, PLLN=192, PLLP=0 -> 96MHz.
-     * configuração para SYSCLK = 96MHz
-     * PLLQ=4 para USB (não usado no Black Pill, mas configurado corretamente). */
-    rcc->pllcfgr = RCC_PLLCFGR_PLLSRC_HSE |
-                   RCC_PLLCFGR_PLLM(25)    |   // 8MHz / 8 = 1MHz
-                   RCC_PLLCFGR_PLLN(192)  |   // 1MHz * 192 = 192MHz
-                   RCC_PLLCFGR_PLLP(0)    |   // /2 = 96MHz
-                   RCC_PLLCFGR_PLLQ(4);       // /4 = 48MHz USB
+    /* PLL: VCO = 25MHz / 25 * 144 = 144MHz.
+     *  SYSCLK = VCO / 2 = 72MHz (PLLP=0 means /2)
+     *  USB    = VCO / 3 = 48MHz */
+    rcc->pllcfgr = (RCC_PLLCFGR_PLLSRC_HSE |
+                    RCC_PLLCFGR_PLLM(25) |
+                    RCC_PLLCFGR_PLLN(144) |
+                    RCC_PLLCFGR_PLLP(0) |
+                    RCC_PLLCFGR_PLLQ(3));
 
     /* Bus divisors. */
-    rcc->cfgr = (RCC_CFGR_PPRE2(0) | /* APB2 = SYSCLK/1 = 96MHz */
-                 RCC_CFGR_PPRE1(4) | /* APB1 = SYSCLK/2 =  48MHz */
-                 RCC_CFGR_HPRE(0));  /* AHB  = SYSCLK/1 = 96MHz */
+    rcc->cfgr = (RCC_CFGR_PPRE2(0) | /* APB2 = SYSCLK/1 = 72MHz */
+                 RCC_CFGR_PPRE1(4) | /* APB1 = SYSCLK/2 = 36MHz */
+                 RCC_CFGR_HPRE(0));  /* AHB  = SYSCLK/1 = 72MHz */
 
     /* Enable and stabilise the PLL. */
     rcc->cr |= RCC_CR_PLLON;
@@ -76,8 +77,6 @@ static void peripheral_init(void)
     (void)rcc->apb2enr;   
 
     /* STM32F411 does not have DMAMUX; DMA request mapping is fixed. */
-									  
-									  
 
     /* Release JTAG pins. */
     gpio_configure_pin(gpioa, 15, GPI_floating);
@@ -100,7 +99,7 @@ void gpio_configure_pin(GPIO gpio, unsigned int pin, unsigned int mode)
     mode >>= 2;
     gpio->otyper  = (gpio->otyper  & ~(1u << pin))        | ((mode & 1u) << pin);
     mode >>= 1;
-    /* STM32 usa ospeedr (2-bit speed) no lugar do odrvr da AT32. */
+    /* STM32 uses OSPEEDR (2-bit speed) in place of AT32 ODRVR. */
     gpio->ospeedr = (gpio->ospeedr & ~(3u << (pin << 1))) | ((mode & 3u) << (pin << 1));
     mode >>= 2;
     gpio->pupdr   = (gpio->pupdr   & ~(3u << (pin << 1))) | ((mode & 3u) << (pin << 1));

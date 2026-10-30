@@ -9,12 +9,6 @@
  * See the file COPYING for more details, or visit <http://unlicense.org>.
  */
 
-#include <stdint.h>
-#include "util.h"
-#include "types.h"
-#include "time.h"
-#include "stm32f411_decls.h"
-
 #define O_FALSE 1
 #define O_TRUE  0
 
@@ -49,9 +43,9 @@ static uint8_t pin_26 = 6; /* PB6 */
 
 #if MCU == MCU_stm32f411
 
-#define pin_34      2      /* PB2 Blackpill */
+#define pin_34      2      /* PB2 (BlackPill: PB3 is used for I2C SDA) */
 
-// in stm32f411_decls.h
+/* RDATA/WDATA pins, timers and DMA streams: see stm32f411_decls.h */
 DEFINE_IRQ(dma_wdata_irq, "IRQ_wdata_dma");
 DEFINE_IRQ(dma_rdata_irq, "IRQ_rdata_dma");
 
@@ -201,14 +195,10 @@ static void board_floppy_init(void)
     gpio_set_af(gpio_data, pin_wdata, pin_wdata_af);
     gpio_configure_pin(gpio_data, pin_wdata, AFI(PUPD_none));
 
-    //gpio_set_af(gpio_data, pin_rdata, 2);
+    gpio_set_af(gpio_data, pin_rdata, pin_rdata_af);
     gpio_configure_pin(gpio_data, pin_rdata, GPO_bus);
 
-    /* STM32F411: DMA request mapping is fixed per stream/channel.
-     * wdata: TIM1_CH1  -> DMA2 Stream6 Channel6 (RM0383 Table 27)
-     * rdata: TIM3_UP   -> DMA1 Stream7 Channel5 (RM0383 Table 26) */
-    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
-    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
+    /* No DMAMUX: DMA channel selection is done in timer_dma_init(). */
 
 #endif
 
@@ -278,7 +268,12 @@ void IRQ_SELA_changed(void) {
         "    ldr  r0, [pc, #8]\n"  /* r0 = gpio_out_active */
         "    ldr  r1, [pc, #12]\n" /* r1 = &gpiob->b[s]rr */
         "    uxth r2, r0\n"        /* r2 = (uint16_t)gpio_out_active */
+#if MCU == MCU_stm32f411
+        /* No BRR register: r1 = &BSRR[15:0] (set) or &BSRR[31:16] (reset) */
+        "    strh r2, [r1, #0]\n"  /* gpiob->bsrr.{set,reset} = ... */
+#else
         "    str  r2, [r1, #0]\n"  /* gpiob->b[s]rr = gpio_out_active */
+#endif
         "    b.n  _IRQ_SELA_changed\n" /* branch to the main ISR entry point */
         "    nop\n"
         "gpio_out_active: .word 0\n"
@@ -315,15 +310,13 @@ static void _IRQ_SELA_changed(uint32_t _gpio_out_active)
     if (drive.sel) {
         /* SELA is asserted (this drive is selected). 
          * Immediately re-enable all our asserted outputs. */
-         
 #if MCU == MCU_stm32f411
-        gpiob->bsrr = (_gpio_out_active & 0xFFFF) << 16;
+        gpiob->bsrr = (_gpio_out_active & 0xffff) << 16;
         gpioa->bsrr = (_gpio_out_active >> 16) << 16;
 #else
         gpiob->brr = _gpio_out_active & 0xffff;
         gpioa->brr = _gpio_out_active >> 16;
 #endif
-         
         /* Set pin_rdata as timer output (AFO_bus). */
         if (_gpio_out_active & m(GPIO_OUT_DMA_RD_ACTIVE))
             change_pin_mode(gpio_data, pin_rdata, AFO_bus);
@@ -338,7 +331,7 @@ static void _IRQ_SELA_changed(uint32_t _gpio_out_active)
         change_pin_mode(gpio_data, pin_rdata, GPO_bus);
         /* Speculate that, on next interrupt, SELA is asserted. */
 #if MCU == MCU_stm32f411
-        *(uint8_t *)&gpiob_setreset = (uint8_t)(uint32_t)&gpiob->bsrr;
+        *(uint8_t *)&gpiob_setreset = (uint8_t)((uint32_t)&gpiob->bsrr + 2);
 #else
         *(uint8_t *)&gpiob_setreset = (uint8_t)(uint32_t)&gpiob->brr;
 #endif

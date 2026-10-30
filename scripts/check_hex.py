@@ -45,7 +45,8 @@ class Target:
 
 targets = { 'stm32f105': Target(kb(32), kb(128), kb(2)),
             'at32f435': Target(kb(48), kb(256), kb(2)),
-            'stm32f411': Target(kb(48), kb(512), kb(16)),}
+            # Last "page" is Flash sector 7 (128kB), reserved for config
+            'stm32f411': Target(kb(48), kb(512), kb(128)) }
 
 def usage(argv):
     fatal("Usage: %s file.hex target" % argv[0])

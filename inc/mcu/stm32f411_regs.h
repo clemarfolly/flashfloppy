@@ -45,6 +45,7 @@ struct flash {
 #define FLASH_CR_SER         (1u<< 1)
 #define FLASH_CR_MER         (1u<< 2)
 #define FLASH_CR_SNB(x)      ((x)<< 3)
+#define FLASH_CR_PSIZE(x)    ((x)<< 8) /* 0=x8, 1=x16, 2=x32, 3=x64 */
 #define FLASH_CR_STRT        (1u<<16)
 #define FLASH_CR_EOPIE       (1u<<24)
 #define FLASH_CR_ERRIE       (1u<<25)
@@ -111,7 +112,6 @@ struct rcc {
 #define RCC_CFGR_SWS(x)      ((x)<< 2)
 #define RCC_CFGR_SW(x)       ((x)<< 0)
 
-#define RCC_AHB1ENR_OTGFSEN  (1u<<27)
 #define RCC_AHB1ENR_DMA2EN   (1u<<22)
 #define RCC_AHB1ENR_DMA1EN   (1u<<21)
 #define RCC_AHB1ENR_CRCEN    (1u<<12)
@@ -221,22 +221,20 @@ struct syscfg {
 #define EXTI_BASE 0x40013c00
 
 /* DMA */
-#define DMA1_Stream2_IRQn 12
-#define DMA1_Stream4_IRQn 14
-#define DMA2_Stream5_IRQn 68
+#define DMA1_Stream2_IRQn 13
+#define DMA1_Stream3_IRQn 14
+#define DMA1_Stream7_IRQn 47
 #define DMA2_Stream6_IRQn 69
 
-#define DMA_LIFCR_CFEIF(x)  (1u << ((x) * 6))
-#define DMA_LIFCR_CDMEIF(x) (1u << ((x) * 6 + 2))
-#define DMA_LIFCR_CTEIF(x)  (1u << ((x) * 6 + 3))
-#define DMA_LIFCR_CHTIF(x)  (1u << ((x) * 6 + 4))
-#define DMA_LIFCR_CTCIF(x)  (1u << ((x) * 6 + 5))
-
-#define DMA_HIFCR_CFEIF(x)  (1u << (((x) - 4) * 6))
-#define DMA_HIFCR_CDMEIF(x) (1u << (((x) - 4) * 6 + 2))
-#define DMA_HIFCR_CTEIF(x)  (1u << (((x) - 4) * 6 + 3))
-#define DMA_HIFCR_CHTIF(x)  (1u << (((x) - 4) * 6 + 4))
-#define DMA_HIFCR_CTCIF(x)  (1u << (((x) - 4) * 6 + 5))
+/* DMA_[LH]ISR / DMA_[LH]IFCR: Each register covers four streams. Within a
+ * register, streams are at bit offsets 0, 6, 16, 22. */
+#define DMA_ISR_SHIFT(s)    ((((s)&1)*6) + ((((s)>>1)&1)*16))
+#define DMA_SxIFCR_CFEIF(s)   (1u << (DMA_ISR_SHIFT(s) + 0))
+#define DMA_SxIFCR_CDMEIF(s)  (1u << (DMA_ISR_SHIFT(s) + 2))
+#define DMA_SxIFCR_CTEIF(s)   (1u << (DMA_ISR_SHIFT(s) + 3))
+#define DMA_SxIFCR_CHTIF(s)   (1u << (DMA_ISR_SHIFT(s) + 4))
+#define DMA_SxIFCR_CTCIF(s)   (1u << (DMA_ISR_SHIFT(s) + 5))
+#define DMA_SxIFCR_CALL(s)    (0x3du << DMA_ISR_SHIFT(s))
 
 /* ===================== DMA_SxCR bit definitions ===================== */
 
@@ -338,6 +336,7 @@ struct i2c {
 #define I2C_SR1_PECERR    (1u<<12)
 #define I2C_SR1_TIMEOUT   (1u<<14)
 #define I2C_SR1_SMBALERT  (1u<<15)
+#define I2C_SR1_ERRORS    0xdf00
 
 #define I2C_SR2_MSL       (1u<< 0)
 #define I2C_SR2_BUSY      (1u<< 1)

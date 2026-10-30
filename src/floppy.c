@@ -542,15 +542,15 @@ static bool_t dma_rd_handle(struct drive *drv)
         dma_rd->state = DMA_inactive;
         /* Reinitialise the circular buffer to empty. */
 
-#if MCU == MCU_stm32f411  
+#if MCU == MCU_stm32f411
+        rdata_dma_rewind();
         dma_rd->cons = dma_rd->prod =
-                ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr;
+            ARRAY_SIZE(dma_rd->buf) - dma_rdata.ndtr;
 #else
         dma_rd->cons = dma_rd->prod =
-                ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
+            ARRAY_SIZE(dma_rd->buf) - dma_rdata.cndtr;
 #endif
-
-/* Free-running index timer. */
+        /* Free-running index timer. */
         timer_cancel(&index.timer);
         timer_set(&index.timer, index.prev_time + drv->image->stk_per_rev);
         break;

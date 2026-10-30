@@ -241,6 +241,24 @@ static void floppy_mount(struct slot *slot)
     index.prev_time = time_now();
 }
 
+#if MCU == MCU_stm32f411
+/* STM32F4 DMA in direct mode preloads the next memory item as soon as a
+ * memory-to-peripheral stream is enabled (RM0383 9.3.11). So we keep the RDATA
+ * stream disabled and rewound to the start of the ring while idle, and enable
+ * it only after the ring has been filled, just before starting the timer. */
+static void rdata_dma_rewind(void)
+{
+    dma_stream_disable(dma_rdata);
+    clear_dma_interrupts_rdata();
+    dma_rdata.ndtr = ARRAY_SIZE(dma_rd->buf);
+}
+static void rdata_dma_enable(void)
+{
+    clear_dma_interrupts_rdata();
+    dma_rdata.cr |= DMA_SxCR_EN;
+}
+#endif
+
 /* Initialise timers and DMA for RDATA/WDATA. */
 static void timer_dma_init(void)
 {
@@ -277,43 +295,37 @@ static void timer_dma_init(void)
     tim_rdata->cr2 = 0;
 
     /* DMA setup: From a circular buffer into the RDATA Timer's ARR. */
-
-    
-    
 #if MCU == MCU_stm32f411
-
+    /* Stream must be disabled, and its flags clear, before reprogramming. */
+    dma_stream_disable(dma_rdata);
+    clear_dma_interrupts_rdata();
     dma_rdata.par = (uint32_t)(unsigned long)&tim_rdata->arr;
     dma_rdata.m0ar = (uint32_t)(unsigned long)dma_rd->buf;
     dma_rdata.ndtr = ARRAY_SIZE(dma_rd->buf);
-
-    dma_rdata.cr =
-          DMA_SxCR_PL_HIGH        | // Prioridade alta do stream (PL[17:16] = 10)
-          DMA_SxCR_MSIZE_16BIT    | // Tamanho do dado na memória = 16 bits (MSIZE[14:13] = 01)
-          DMA_SxCR_PSIZE_16BIT    | // Tamanho do dado no periférico = 16 bits (PSIZE[12:11] = 01)
-          DMA_SxCR_MINC           | // Incrementa o endereço da memória a cada transferência
-          DMA_SxCR_CIRC           | // Modo circular (reinicia automaticamente ao chegar em NDTR = 0)
-          DMA_SxCR_DIR_M2P        | // Direção: memória -> periférico (DIR[7:6] = 01)
-          DMA_SxCR_HTIE           | // Habilita interrupção de Half Transfer
-          DMA_SxCR_TCIE           | // Habilita interrupção de Transfer Complete
-          DMA_SxCR_EN;              // Habilita o stream (inicia a transferência)
-    
-    dma_rdata.cr |= DMA_CR_CHSEL(dma_rdata_ch);
-    
+    dma_rdata.fcr = 0; /* direct mode */
+    dma_rdata.cr = (DMA_CR_CHSEL(dma_rdata_ch) |
+                    DMA_SxCR_PL_HIGH |
+                    DMA_SxCR_MSIZE_16BIT |
+                    DMA_SxCR_PSIZE_16BIT |
+                    DMA_SxCR_MINC |
+                    DMA_SxCR_CIRC |
+                    DMA_SxCR_DIR_M2P |
+                    DMA_SxCR_HTIE |
+                    DMA_SxCR_TCIE); /* enabled by rdata_start() */
 #else
 
-    dma_rdata.cpar = (uint32_t)(unsigned long)&tim_rdata->arr; 
-    dma_rdata.cmar = (uint32_t)(unsigned long)dma_rd->buf; 
-    dma_rdata.cndtr = ARRAY_SIZE(dma_rd->buf); 
-    dma_rdata.ccr = (DMA_CCR_PL_HIGH | 
-                     DMA_CCR_MSIZE_16BIT | 
-                     DMA_CCR_PSIZE_16BIT | 
-                     DMA_CCR_MINC | 
-                     DMA_CCR_CIRC | 
-                     DMA_CCR_DIR_M2P | 
-                     DMA_CCR_HTIE | 
-                     DMA_CCR_TCIE | 
+    dma_rdata.cpar = (uint32_t)(unsigned long)&tim_rdata->arr;
+    dma_rdata.cmar = (uint32_t)(unsigned long)dma_rd->buf;
+    dma_rdata.cndtr = ARRAY_SIZE(dma_rd->buf);
+    dma_rdata.ccr = (DMA_CCR_PL_HIGH |
+                     DMA_CCR_MSIZE_16BIT |
+                     DMA_CCR_PSIZE_16BIT |
+                     DMA_CCR_MINC |
+                     DMA_CCR_CIRC |
+                     DMA_CCR_DIR_M2P |
+                     DMA_CCR_HTIE |
+                     DMA_CCR_TCIE |
                      DMA_CCR_EN);
-
 #endif
 
     /* WDATA Timer setup: 
@@ -330,29 +342,25 @@ static void timer_dma_init(void)
     tim_wdata->cr2 = 0;
 
 
-#if MCU == MCU_stm32f411
-
     /* DMA setup: From the WDATA Timer's CCRx into a circular buffer. */
+#if MCU == MCU_stm32f411
+    dma_stream_disable(dma_wdata);
+    clear_dma_interrupts_wdata();
     dma_wdata.par = (uint32_t)(unsigned long)&tim_wdata->ccr1;
     dma_wdata.m0ar = (uint32_t)(unsigned long)dma_wr->buf;
     dma_wdata.ndtr = ARRAY_SIZE(dma_wr->buf);
-                     
-    dma_wdata.cr =
-          DMA_SxCR_PL_HIGH        | // Prioridade alta do stream (PL[17:16] = 10)
-          DMA_SxCR_MSIZE_16BIT    | // Tamanho do dado na memória = 16 bits (MSIZE[14:13] = 01)
-          DMA_SxCR_PSIZE_16BIT    | // Tamanho do dado no periférico = 16 bits (PSIZE[12:11] = 01)
-          DMA_SxCR_MINC           | // Incrementa o endereço da memória a cada transferência
-          DMA_SxCR_CIRC           | // Modo circular (reinicia automaticamente ao chegar em NDTR = 0)
-          DMA_SxCR_DIR_P2M        | // Direção: periférico -> memória 
-          DMA_SxCR_HTIE           | // Habilita interrupção de Half Transfer
-          DMA_SxCR_TCIE           | // Habilita interrupção de Transfer Complete
-          DMA_SxCR_EN;    
-
-    dma_wdata.cr |= DMA_CR_CHSEL(dma_wdata_ch);
-
+    dma_wdata.fcr = 0; /* direct mode */
+    dma_wdata.cr = (DMA_CR_CHSEL(dma_wdata_ch) |
+                    DMA_SxCR_PL_HIGH |
+                    DMA_SxCR_MSIZE_16BIT |
+                    DMA_SxCR_PSIZE_16BIT |
+                    DMA_SxCR_MINC |
+                    DMA_SxCR_CIRC |
+                    DMA_SxCR_DIR_P2M |
+                    DMA_SxCR_HTIE |
+                    DMA_SxCR_TCIE |
+                    DMA_SxCR_EN);
 #else
-
-    /* DMA setup: From the WDATA Timer's CCRx into a circular buffer. */
     dma_wdata.cpar = (uint32_t)(unsigned long)&tim_wdata->ccr1;
     dma_wdata.cmar = (uint32_t)(unsigned long)dma_wr->buf;
     dma_wdata.cndtr = ARRAY_SIZE(dma_wr->buf);
@@ -536,6 +544,10 @@ static void rdata_start(void)
 
     dma_rd->state = DMA_active;
     dma_rd_set_active(TRUE);
+
+#if MCU == MCU_stm32f411
+    rdata_dma_enable();
+#endif
 
     /* Start timer. */
     tim_rdata->egr = TIM_EGR_UG;

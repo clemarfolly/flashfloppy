@@ -42,7 +42,7 @@ vector_table:
 #elif MCU == MCU_stm32f411
                                                     I(68) I(69)
     I(70) I(71) I(72) I(73) I(74) I(75) I(76) I(77) I(78) I(79)
-    I(80) I(81)
+    I(80) I(81) I(82) I(83) I(84) I(85)
 #endif
 
     .text
